@@ -1,0 +1,25 @@
+# ---- 运行时缓存 / 日志 / 用户配置 ----
+ad_filter_cache.db
+ad_filter_cache.db-journal
+selftest_cache.db
+bench_cache.db
+ad_filter_log.jsonl
+ad_filter_config.json
+*.db-journal
+
+# ---- 构建产物 ----
+广告图过滤.exe
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+
+# ---- 测试样本 ----
+# 合成样本可由 `python ad_filter.py --make-fixtures` 重新生成；
+# 真实广告样本（real*.png/jpg）属于个人数据，绝不入库。
+testdata/
+!testdata/.gitkeep
+
+# ---- 开发日志（含本地调试细节）----
+DEVLOG.md
