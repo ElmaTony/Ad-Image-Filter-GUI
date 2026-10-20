@@ -43,6 +43,7 @@ else:
 CONFIG_PATH = APP_DIR / "ad_filter_config.json"
 CACHE_PATH = APP_DIR / "ad_filter_cache.db"
 LOG_PATH = APP_DIR / "ad_filter_log.jsonl"
+HISTORY_PATH = APP_DIR / "ad_filter_history.json"
 QUARANTINE_NAME = "_广告隔离"
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
@@ -788,6 +789,103 @@ def restore_quarantine(quarantine_root: Path, log_fn) -> tuple[int, list[str]]:
     manifest["items"] = remaining
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
     return restored, errors
+
+
+# ---------- 扫描历史 ----------
+def append_history(entry: dict, keep: int = 100) -> None:
+    """追加一条扫描历史（时间/根/总数/命中/耗时），最多保留 keep 条。"""
+    try:
+        hist = load_history()
+        hist.append(entry)
+        HISTORY_PATH.write_text(json.dumps(hist[-keep:], ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def load_history() -> list[dict]:
+    try:
+        if HISTORY_PATH.exists():
+            data = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+
+# ---------- 隔离区条目化管理 ----------
+def list_quarantine(quarantine_root: Path) -> list[dict]:
+    """读 manifest.json，每条附 exists 标记；文件缺失不丢弃（可删记录）。"""
+    manifest_path = quarantine_root / "manifest.json"
+    if not manifest_path.exists():
+        return []
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    out = []
+    for it in manifest.get("items", []):
+        out.append({**it, "exists": Path(it.get("dst", "")).exists()})
+    return out
+
+
+def _select_manifest(quarantine_root: Path, dsts: list[str]):
+    """返回 (manifest_path, 选中条目, 剩余条目)。"""
+    manifest_path = quarantine_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    want = set(dsts)
+    picked = [it for it in manifest.get("items", []) if it.get("dst") in want]
+    rest = [it for it in manifest.get("items", []) if it.get("dst") not in want]
+    return manifest_path, manifest, picked, rest
+
+
+def restore_quarantine_items(quarantine_root: Path, dsts: list[str], log_fn) -> tuple[int, list[str]]:
+    """按 dst 精确还原选中条目（manifest 中移除已还原项）。"""
+    try:
+        manifest_path, manifest, picked, rest = _select_manifest(quarantine_root, dsts)
+    except Exception as e:
+        return 0, [f"读取清单失败：{e}"]
+    errors, restored = [], 0
+    for it in picked:
+        src, dst = Path(it["dst"]), Path(it["src"])
+        try:
+            if not src.exists():
+                errors.append(f"隔离文件丢失 {src}")
+                rest.append(it)
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.exists():
+                dst = dst.with_name(dst.stem + f"_还原{int(time.time()) % 100000}" + dst.suffix)
+            shutil.move(str(src), str(dst))
+            log_fn({"action": "restore", "dst": str(dst)})
+            restored += 1
+        except Exception as e:
+            errors.append(f"{src}: {e}")
+            rest.append(it)
+    manifest["items"] = rest
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+    return restored, errors
+
+
+def delete_quarantine_items(quarantine_root: Path, dsts: list[str], log_fn) -> tuple[int, list[str]]:
+    """按 dst 永久删除选中的隔离文件（manifest 中移除记录）。"""
+    try:
+        manifest_path, manifest, picked, rest = _select_manifest(quarantine_root, dsts)
+    except Exception as e:
+        return 0, [f"读取清单失败：{e}"]
+    errors, deleted = [], 0
+    for it in picked:
+        try:
+            p = Path(it["dst"])
+            if p.exists():
+                os.remove(p)
+            log_fn({"action": "quarantine_delete", "dst": it["dst"]})
+            deleted += 1
+        except Exception as e:
+            errors.append(f"{it.get('dst')}: {e}")
+            rest.append(it)
+    manifest["items"] = rest
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+    return deleted, errors
 
 
 def log_jsonl(entry: dict):

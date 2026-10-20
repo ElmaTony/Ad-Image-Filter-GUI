@@ -5,6 +5,7 @@
 交互：单击选中看详情；空格/点圆圈勾选；↑↓←→ 移动；双击/Enter 大图；Ctrl+A 全选
 主题：Claude 暖色（陶土橙 #d97757）
 """
+import json
 import os
 import queue
 import sys
@@ -597,6 +598,22 @@ class Lightbox(QWidget):
         self._press_pos = None
         self._enter = 1.0   # 入场动画进度（showEvent 里从 0 渐到 1）
         self._load(path)
+        # 底部右侧：图内直接处置按钮（A 标广告 / K 保留）
+        self.btn_ad = QPushButton("标记广告 (A)", self)
+        self.btn_ad.setCursor(Qt.PointingHandCursor)
+        self.btn_ad.setStyleSheet(
+            "QPushButton { background: rgba(198,97,63,0.92); color: #fff; border: none;"
+            " border-radius: 14px; padding: 6px 16px; font-size: 12px; }"
+            "QPushButton:hover { background: rgba(217,119,87,1.0); }")
+        self.btn_ad.clicked.connect(lambda: self._mark(True))
+        self.btn_keep = QPushButton("保留 (K)", self)
+        self.btn_keep.setCursor(Qt.PointingHandCursor)
+        self.btn_keep.setStyleSheet(
+            "QPushButton { background: rgba(255,255,255,0.14); color: #f5f5f5; border: none;"
+            " border-radius: 14px; padding: 6px 16px; font-size: 12px; }"
+            "QPushButton:hover { background: rgba(255,255,255,0.24); }")
+        self.btn_keep.clicked.connect(lambda: self._mark(False))
+        self._place_mark_btns()
         # 覆盖主窗口
         if parent is not None:
             self.resize(parent.size())
@@ -647,6 +664,27 @@ class Lightbox(QWidget):
 
     def _it(self):
         return next((x for x in self.app.items if x["path"] == self.path), None)
+
+    def _place_mark_btns(self):
+        y = self.height() - 46
+        w_ad, w_keep = 108, 84
+        self.btn_keep.setGeometry(self.width() - 18 - w_keep, y, w_keep, 32)
+        self.btn_ad.setGeometry(self.width() - 18 - w_keep - 10 - w_ad, y, w_ad, 32)
+        self.btn_ad.raise_()
+        self.btn_keep.raise_()
+
+    def _mark(self, as_ad):
+        self.app.mark_path(self.path, as_ad)
+        self.update()
+        if not as_ad:
+            # 保留 = 移出结果列表：自动跳到下一张，没有则关闭
+            if not self._nav(1) and not self._nav(-1):
+                self.close()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if hasattr(self, "btn_ad"):
+            self._place_mark_btns()
 
     def _fit(self):
         if not self._pix or self._pix.isNull():
@@ -804,17 +842,31 @@ class Lightbox(QWidget):
     def _nav(self, delta):
         items = self.app.model.items
         if not items:
-            return
+            return False
         # 切换图片时轻量重放入场（80ms 快速淡入）
         try:
             idx = next(i for i, x in enumerate(items) if x["path"] == self.path)
         except StopIteration:
-            return
+            # 当前图已被移出列表（如刚点"保留"）：从锚点附近继续
+            return self._nav_nearest()
         idx = max(0, min(len(items) - 1, idx + delta))
         self.app.grid.setCurrentIndex(self.app.model.index(idx, 0))
         self._load(items[idx]["path"])
         self._play_enter()
         self._enter_anim.setDuration(80)
+        return True
+
+    def _nav_nearest(self):
+        items = self.app.model.items
+        if not items:
+            return False
+        idx = self.app.grid.currentIndex().row()
+        idx = max(0, min(len(items) - 1, idx))
+        self.app.grid.setCurrentIndex(self.app.model.index(idx, 0))
+        self._load(items[idx]["path"])
+        self._play_enter()
+        self._enter_anim.setDuration(80)
+        return True
 
     def keyPressEvent(self, e):
         k = e.key()
@@ -824,6 +876,10 @@ class Lightbox(QWidget):
             self._nav(-1)
         elif k == Qt.Key_Right:
             self._nav(1)
+        elif k == Qt.Key_A:
+            self._mark(True)
+        elif k == Qt.Key_K:
+            self._mark(False)
 
 
 class Segmented(QWidget):
@@ -1128,6 +1184,7 @@ class App(FramelessWindow):
         self._cache = None  # run_gui 注入；直接构造 App 时为 None，扫描前防御
         self._roots = []   # 不记忆上次的文件夹：每次启动从空列表开始
         self._rules_editor = None
+        self._undo_batch = None   # (quarantine_root, [src_paths]) 上一次隔离处置
 
         self.thumbs = ThumbCache()
         self.model = ResultModel()
@@ -1317,6 +1374,14 @@ class App(FramelessWindow):
         self.btn_cfg.setToolTip("扫描设置与规则")
         self.btn_cfg.clicked.connect(self.open_config)
         tl.addWidget(self.btn_cfg)
+        self.btn_history = ToolButton(FIF.HISTORY, top)
+        self.btn_history.setToolTip("扫描历史记录")
+        self.btn_history.clicked.connect(self.open_history)
+        tl.addWidget(self.btn_history)
+        self.btn_export = ToolButton(FIF.SAVE, top)
+        self.btn_export.setToolTip("导出当前结果为 CSV 报告")
+        self.btn_export.clicked.connect(self.export_report)
+        tl.addWidget(self.btn_export)
         tl.addStretch(1)
         self.dot = StatusDot(top)
         tl.addWidget(self.dot)
@@ -1363,6 +1428,12 @@ class App(FramelessWindow):
         self._search_timer.timeout.connect(self.refresh)
         self.f_search.textChanged.connect(lambda _t: self._search_timer.start())
         frow.addWidget(self.f_search)
+        self.f_sort = ComboBox(left)
+        self.f_sort.addItems(["默认顺序", "名称", "大小", "修改时间", "分数"])
+        self.f_sort.setFixedWidth(104)
+        self.f_sort.setToolTip("结果排序方式")
+        self.f_sort.currentIndexChanged.connect(lambda _i: self.refresh())
+        frow.addWidget(self.f_sort)
         frow.addStretch(1)
         self.lbl_count = CaptionLabel("命中 0 · 已选 0", left)
         frow.addWidget(self.lbl_count)
@@ -1469,6 +1540,11 @@ class App(FramelessWindow):
         self.btn_dd = self.seg_disposal._btns[2]
         bl.addWidget(self.seg_disposal)
         bl.addStretch(1)
+        self.btn_undo = TransparentPushButton(FIF.BACK_TO_WINDOW, "撤销处置", bot)
+        self.btn_undo.setToolTip("撤销上一次隔离处置（文件移回原位置）")
+        self.btn_undo.setEnabled(False)
+        self.btn_undo.clicked.connect(self.undo_disposal)
+        bl.addWidget(self.btn_undo)
         self.btn_openq = TransparentPushButton("打开隔离目录", bot)
         self.btn_openq.clicked.connect(self.open_quarantine_dir)
         bl.addWidget(self.btn_openq)
@@ -1562,6 +1638,9 @@ class App(FramelessWindow):
             elif k == Qt.Key_A and (ev.modifiers() & Qt.ControlModifier):
                 self.select_all()
                 return True
+            elif k == Qt.Key_Delete:
+                self.execute_disposal()
+                return True
             return False
         if g is not None and obj is g.viewport():
             if ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
@@ -1586,6 +1665,9 @@ class App(FramelessWindow):
                     if k == Qt.Key_A and (ev.modifiers() & Qt.ControlModifier):
                         self.select_all()
                         return True
+                elif k == Qt.Key_Delete:
+                    self.execute_disposal()
+                    return True
         return super().eventFilter(obj, ev)
 
     def toggle_check(self, row):
@@ -1872,6 +1954,8 @@ class App(FramelessWindow):
         self._pending_rows.clear()
         self._current_file = None
         self._current_root = None
+        self._stat_cache = {}
+        self._scan_t0 = time.time()
         self.btn_scan.setEnabled(False)
         self.dot.set_state("running")
         self._log(f"开始扫描：{len(roots)} 个文件夹")
@@ -1913,6 +1997,7 @@ class App(FramelessWindow):
         done = cancelled = False
         disposed = restored = None
         similar = None
+        qop = None
         cached_n = None
         folder_updated = False
         current_hit = False
@@ -1951,6 +2036,8 @@ class App(FramelessWindow):
                     restored = payload
                 elif kind == "similar":
                     similar = payload
+                elif kind == "quarantine_op":
+                    qop = payload
                 elif kind == "done":
                     done = True
         except queue.Empty:
@@ -1979,8 +2066,12 @@ class App(FramelessWindow):
                 self.dot.set_state("ready")
                 self.status.setText("已取消")
             elif disposed is not None:
-                mode, moved, errors, ok_paths = disposed
+                mode, moved, errors, ok_paths = disposed[0], disposed[1], disposed[2], disposed[3]
+                q_root_str = disposed[4] if len(disposed) > 4 else None
                 self._disposing = False
+                if mode == "quarantine" and ok_paths and q_root_str:
+                    self._undo_batch = (q_root_str, list(ok_paths))
+                    self.btn_undo.setEnabled(True)
                 pset = set(ok_paths)
                 self.items = [it for it in self.items if it["path"] not in pset]
                 for p in pset:
@@ -2019,6 +2110,12 @@ class App(FramelessWindow):
                 n_su = len(self.items) - n_ad
                 self.status.setText(f"扫描完成 · 命中 {len(self.items)}（广告 {n_ad} / 疑似 {n_su}）")
                 self._log(f"扫描完成：命中 {len(self.items)}（广告 {n_ad} / 疑似 {n_su}）")
+                af.append_history({
+                    "time": time.strftime("%F %T"),
+                    "roots": [Path(r).name for r in self.get_roots()],
+                    "total": self.total_files,
+                    "hits": len(self.items), "ad": n_ad, "suspect": n_su,
+                    "duration": round(time.time() - getattr(self, "_scan_t0", time.time()), 1)})
                 self._current_file = None
                 self._current_root = None
                 self.folder_bar.update_progress()
@@ -2029,6 +2126,18 @@ class App(FramelessWindow):
                 self._start_similar()
             if similar is not None:
                 self._apply_similar(similar)
+            if qop is not None:
+                verb, n, errors = qop
+                self._log(f"隔离区{verb}：{n} 项" + (f"，{len(errors)} 项失败" if errors else ""))
+                self._toast(f"隔离区{verb}完成：{n} 项", ok=not errors)
+                dlg = getattr(self, "_qdlg", None)
+                if dlg is not None:
+                    try:
+                        dlg.reload()
+                        for b in (dlg.btn_rs, dlg.btn_dl, dlg.btn_ra):
+                            b.setEnabled(True)
+                    except RuntimeError:
+                        self._qdlg = None
         except Exception:
             import traceback
             traceback.print_exc()
@@ -2087,8 +2196,32 @@ class App(FramelessWindow):
             return False
         return True
 
+    def _stat(self, path: str):
+        """懒加载 size/mtime 缓存（排序用）；文件被处置后返回 None。"""
+        if not hasattr(self, "_stat_cache"):
+            self._stat_cache = {}
+        if path not in self._stat_cache:
+            try:
+                st = os.stat(path)
+                self._stat_cache[path] = (st.st_size, st.st_mtime)
+            except OSError:
+                self._stat_cache[path] = None
+        return self._stat_cache[path]
+
+    def _sorted_items(self, items):
+        idx = self.f_sort.currentIndex() if hasattr(self, "f_sort") else 0
+        if idx == 0:
+            return items
+        if idx == 1:
+            return sorted(items, key=lambda it: Path(it["path"]).name.lower())
+        if idx == 2:
+            return sorted(items, key=lambda it: (self._stat(it["path"]) or (0, 0))[0], reverse=True)
+        if idx == 3:
+            return sorted(items, key=lambda it: (self._stat(it["path"]) or (0, 0))[1], reverse=True)
+        return sorted(items, key=lambda it: it.get("score", 0), reverse=True)
+
     def refresh(self):
-        self.model.reset_items([it for it in self.items if self._passes_filter(it)])
+        self.model.reset_items(self._sorted_items([it for it in self.items if self._passes_filter(it)]))
         self._sync_fade_visibility()
         self.model.checked = self.checked
         self.grid.viewport().update()
@@ -2237,6 +2370,28 @@ class App(FramelessWindow):
         self.step(1)
         return self
 
+    def mark_path(self, path, as_ad):
+        """按路径标记（Lightbox 内处置用）：广告=勾选，保留=移出结果列表。"""
+        it = next((x for x in self.items if x["path"] == path), None)
+        if not it:
+            return self
+        if as_ad:
+            self.model.checked.add(path)
+            self.checked = self.model.checked
+            self.grid.viewport().update()
+            self._update_count_label()
+            self._log(f"标记广告：{Path(path).name}")
+        else:
+            self.items = [x for x in self.items if x["path"] != path]
+            self._pending_rows = [x for x in self._pending_rows if x["path"] != path]
+            self.model.checked.discard(path)
+            self.checked = self.model.checked
+            if hasattr(self, "_stat_cache"):
+                self._stat_cache.pop(path, None)
+            self.refresh()
+            self._log(f"标记保留：{Path(path).name}")
+        return self
+
     def open_big(self):
         """CDS 画廊查看器：暗底 + 滚轮缩放/拖拽平移/双击切换 + ←→/Esc 关闭。"""
         cur = self._current_item()
@@ -2266,8 +2421,20 @@ class App(FramelessWindow):
             self._info("提示", "扫描正在进行，请等扫描结束或先取消再处置\n（处置会让正在分析的文件消失，结果不可信）")
             return
         mode = self._current_disposal()
+        # 处置前影响预览：按判定分类计数 + 总大小
+        n_ad = sum(1 for it in checked_items if it["verdict"] == "ad")
+        n_su = sum(1 for it in checked_items if it["verdict"] == "suspect")
+        n_er = len(checked_items) - n_ad - n_su
+        total_bytes = 0
+        for it in checked_items:
+            st = self._stat(it["path"])
+            if st:
+                total_bytes += st[0]
+        size_mb = total_bytes / 1048576
+        breakdown = f"共 {len(checked_items)} 张（广告 {n_ad} / 疑似 {n_su}" + \
+                    (f" / 异常 {n_er}" if n_er else "") + f"）· 总大小 {size_mb:.1f} MB"
         if mode == "delete" and not self._ask(
-                "危险操作", f"将永久删除 {len(checked_items)} 张图片，不可恢复！\n确定继续？"):
+                "危险操作", f"{breakdown}\n将永久删除，不可恢复！\n确定继续？"):
             return
         roots = self.get_roots()
         q_root = None
@@ -2275,7 +2442,11 @@ class App(FramelessWindow):
             base = Path(roots[0]).anchor if roots else str(Path.home().anchor)
             q_root = Path(base) / af.QUARANTINE_NAME
             if not self._ask("隔离确认",
-                             f"将把 {len(checked_items)} 张图移动到\n{q_root}\n（可随时恢复）\n继续？"):
+                             f"{breakdown}\n将移动到\n{q_root}\n（可随时恢复 / 撤销）\n继续？"):
+                return
+        elif mode == "recycle":
+            if not self._ask("回收站确认",
+                             f"{breakdown}\n将移入系统回收站（可从回收站还原）\n继续？"):
                 return
         self.btn_scan.setEnabled(False)
         self.btn_dispose.setEnabled(False)
@@ -2293,7 +2464,8 @@ class App(FramelessWindow):
                 else:
                     moved, errors, ok_paths = af.apply_delete(checked_items, af.log_jsonl)
             finally:
-                self.scan_q.put(("disposed", (mode, moved, errors, ok_paths)))
+                self.scan_q.put(("disposed", (mode, moved, errors, ok_paths,
+                                              str(q_root) if q_root else None)))
 
         threading.Thread(target=work, daemon=True).start()
         return self
@@ -2308,21 +2480,73 @@ class App(FramelessWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(q_root)))
         return self
 
-    def restore_ui(self):
-        d = QFileDialog.getExistingDirectory(self, "选择隔离目录（含 manifest.json）")
-        if not d:
-            return
-        self.btn_restore.setEnabled(False)
+    def undo_disposal(self):
+        """撤销上一次隔离处置：按 manifest 把该批文件移回原位置。"""
+        if not self._undo_batch:
+            return self
+        q_root_str, srcs = self._undo_batch
+        if not self._ask("撤销处置", f"将把上次隔离的 {len(srcs)} 张图移回原位置\n继续？"):
+            return self
+        self.btn_undo.setEnabled(False)
+        self._undo_batch = None
 
         def work():
-            self._disposing = True
-            restored, errors = 0, []
             try:
-                restored, errors = af.restore_quarantine(Path(d), af.log_jsonl)
+                entries = af.list_quarantine(Path(q_root_str))
+                want = set(srcs)
+                dsts = [e["dst"] for e in entries if e.get("src") in want]
+                restored, errors = af.restore_quarantine_items(Path(q_root_str), dsts, af.log_jsonl)
+            except Exception as e:
+                restored, errors = 0, [str(e)]
             finally:
                 self.scan_q.put(("restored", (restored, errors)))
 
         threading.Thread(target=work, daemon=True).start()
+        self._log(f"撤销上次隔离处置（{len(srcs)} 张）")
+        return self
+
+    def restore_ui(self):
+        """隔离区管理：查看 / 还原选中 / 彻底删除 / 全部还原。"""
+        roots = self.get_roots()
+        base = Path(roots[0]).anchor if roots else str(Path.home().anchor)
+        q_root = Path(base) / af.QUARANTINE_NAME
+        if not q_root.exists():
+            d = QFileDialog.getExistingDirectory(self, "选择隔离目录（含 manifest.json）")
+            if not d:
+                return self
+            q_root = Path(d)
+        self._qdlg = QuarantineDialog(self, q_root)
+        try:
+            self._qdlg.exec()
+        finally:
+            self._qdlg = None
+        return self
+
+    def open_history(self):
+        HistoryDialog(self).exec()
+        return self
+
+    def export_report(self):
+        """导出当前筛选后的结果为 CSV（Excel 可直接打开，带 BOM）。"""
+        items = self.model.items
+        if not items:
+            self._info("提示", "当前没有可导出的结果")
+            return self
+        default = f"广告图过滤报告_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+        path, _ok = QFileDialog.getSaveFileName(self, "导出报告", default, "CSV 文件 (*.csv)")
+        if not path:
+            return self
+        import csv
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["文件名", "路径", "所在文件夹", "判定", "分数", "命中原因"])
+            for it in items:
+                reasons = "; ".join(h.get("label", "") for h in it.get("reasons", []))
+                w.writerow([Path(it["path"]).name, it["path"], it.get("_folder", ""),
+                            VERDICT_TEXT.get(it["verdict"], it["verdict"]),
+                            f"{it.get('score', 0):.0f}", reasons])
+        self._toast(f"已导出 {len(items)} 条到 {Path(path).name}")
+        self._log(f"导出报告：{path}（{len(items)} 条）")
         return self
 
 
@@ -2388,7 +2612,13 @@ class ConfigDialog(MessageBoxBase):
         b_rm.clicked.connect(self._rm)
         b_rules = TransparentPushButton(FIF.SETTING, "规则管理…", self.widget)
         b_rules.clicked.connect(self._open_rules)
-        for b in (b_add, b_rm, b_rules):
+        b_exp = TransparentPushButton(FIF.SAVE, "导出配置", self.widget)
+        b_exp.setToolTip("把当前配置（含规则词库）保存为 JSON，可分享给另一台机器")
+        b_exp.clicked.connect(self._export_cfg)
+        b_imp = TransparentPushButton(FIF.FOLDER_ADD, "导入配置", self.widget)
+        b_imp.setToolTip("从 JSON 文件导入配置（覆盖当前配置并立即保存）")
+        b_imp.clicked.connect(self._import_cfg)
+        for b in (b_add, b_rm, b_rules, b_exp, b_imp):
             frow.addWidget(b)
         frow.addStretch(1)
         self.viewLayout.addLayout(frow)
@@ -2448,6 +2678,43 @@ class ConfigDialog(MessageBoxBase):
     def _open_rules(self):
         self.app.build_rule_editor().exec()
 
+    def _export_cfg(self):
+        path, _ok = QFileDialog.getSaveFileName(self, "导出配置", "ad_filter_config.json",
+                                                "JSON 文件 (*.json)")
+        if not path:
+            return
+        try:
+            data = {k: v for k, v in self.cfg.items() if not k.startswith("_last_")}
+            Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            InfoBar.success(title="已导出", content=Path(path).name,
+                            orient=Qt.Horizontal, isClosable=True,
+                            position=InfoBarPosition.TOP, duration=2500, parent=self)
+        except Exception as e:
+            InfoBar.error(title="导出失败", content=str(e),
+                          orient=Qt.Horizontal, isClosable=True,
+                          position=InfoBarPosition.TOP, duration=4000, parent=self)
+
+    def _import_cfg(self):
+        path, _ok = QFileDialog.getOpenFileName(self, "导入配置", "", "JSON 文件 (*.json)")
+        if not path:
+            return
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or "ocr_keywords" not in data:
+                raise ValueError("不是有效的广告图过滤配置（缺少 ocr_keywords）")
+        except Exception as e:
+            InfoBar.error(title="导入失败", content=str(e),
+                          orient=Qt.Horizontal, isClosable=True,
+                          position=InfoBarPosition.TOP, duration=4000, parent=self)
+            return
+        # 原地更新（app.cfg 引用不变）并立即落盘；界面控件重开对话框即可见新值
+        self.cfg.clear()
+        self.cfg.update(data)
+        af.save_config(self.cfg)
+        InfoBar.success(title="已导入", content="配置已生效；重新打开设置可查看新值",
+                        orient=Qt.Horizontal, isClosable=True,
+                        position=InfoBarPosition.TOP, duration=3000, parent=self)
+
     def validate(self):
         roots = [self.folder_list.item(i).data(Qt.UserRole) for i in range(self.folder_list.count())]
         self.app._roots = [r for r in roots if r]
@@ -2488,6 +2755,7 @@ class RuleEditorLite(MessageBoxBase):
             "filename_rules": self._rule_page(cfg_ref.get("filename_rules", []), False, "文件名规则"),
             "ocr_keywords": self._rule_page(cfg_ref.get("ocr_keywords", []), True, "OCR 词库"),
             "whitelist_rules": self._rule_page(cfg_ref.get("whitelist_rules", []), False, "白名单"),
+            "tester": self._tester_page(),
         }
         for key, pg in self._pages.items():
             self.stack.addWidget(pg["page"])
@@ -2542,6 +2810,102 @@ class RuleEditorLite(MessageBoxBase):
         t.setMinimumHeight(260)
         return {"page": page, "table": t, "weight": with_weight, "label": label}
 
+    def _collect_rules(self):
+        """从三个表格实时收集规则（含未保存的编辑；无效正则/权重跳过）。"""
+        import re
+        out = {}
+        for key, pg in self._pages.items():
+            t = pg.get("table")
+            if t is None:
+                continue
+            rules = []
+            for r in range(t.rowCount()):
+                pat_it, lab_it = t.item(r, 0), t.item(r, 1)
+                pat = (pat_it.text() if pat_it else "").strip()
+                lab = (lab_it.text() if lab_it else "").strip()
+                if not pat:
+                    continue
+                try:
+                    re.compile(pat)
+                except re.error:
+                    continue
+                rule = {"pattern": pat, "label": lab or "自定义"}
+                if pg["weight"]:
+                    w_it = t.item(r, 2)
+                    try:
+                        rule["weight"] = max(1, int(float((w_it.text() if w_it else "1").strip() or 1)))
+                    except ValueError:
+                        continue
+                rules.append(rule)
+            out[key] = rules
+        return out
+
+    def _tester_page(self):
+        """规则测试器：贴 OCR 文本（可选文件名）试算得分与判定，用当前表格内容（不必先保存）。"""
+        from PySide6.QtWidgets import QLineEdit
+        page = QWidget(self.widget)
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 8, 0, 0)
+        lay.setSpacing(8)
+        lay.addWidget(CaptionLabel("文件名（可选，测文件名规则 / 白名单）", page))
+        self.t_name = QLineEdit(page)
+        self.t_name.setPlaceholderText("例如：预览_@DemoChannel.jpg")
+        lay.addWidget(self.t_name)
+        lay.addWidget(CaptionLabel("OCR 识别文本（把图上可能出现的文字贴进来）", page))
+        self.t_in = TextEdit(page)
+        self.t_in.setPlaceholderText("例如：免费发布 关注我的频道 t.me/demo 扫码进群")
+        self.t_in.setMinimumHeight(110)
+        lay.addWidget(self.t_in)
+        btn = PrimaryPushButton("计算得分", page)
+        btn.clicked.connect(self._run_test)
+        lay.addWidget(btn)
+        self.t_out = TextEdit(page)
+        self.t_out.setReadOnly(True)
+        self.t_out.setMinimumHeight(150)
+        lay.addWidget(self.t_out, 1)
+        return {"page": page, "label": "规则测试器"}
+
+    def _run_test(self):
+        rules = self._collect_rules()
+        text = self.t_in.toPlainText()
+        name = self.t_name.text().strip()
+        ocr_cfg = self.cfg.get("ocr", {})
+        high = float(ocr_cfg.get("score_high", 6))
+        low = float(ocr_cfg.get("score_low", 3))
+        lines = []
+
+        wl_hits = af.match_rules(name, rules.get("whitelist_rules", [])) if name else []
+        fn_hits = af.match_rules(name, rules.get("filename_rules", [])) if name else []
+        hits, score, joined = af.score_ocr_texts([text], rules.get("ocr_keywords", [])) if text.strip() else ([], 0.0, "")
+
+        if wl_hits:
+            verdict, vtext = "clean", "正常（白名单放行）"
+        elif fn_hits:
+            verdict, vtext = "ad", "广告（文件名规则命中）"
+        elif score >= high:
+            verdict, vtext = "ad", f"广告（{score:.0f} ≥ 阈值 {high:.0f}）"
+        elif score >= low:
+            verdict, vtext = "suspect", f"疑似（{score:.0f} ≥ 阈值 {low:.0f}）"
+        else:
+            verdict, vtext = "clean", f"正常（{score:.0f} < 阈值 {low:.0f}）"
+
+        lines.append(f"判定：{vtext}")
+        lines.append(f"OCR 得分：{score:.0f}（广告 ≥{high:.0f} / 疑似 ≥{low:.0f}）")
+        if wl_hits:
+            lines.append("\n白名单命中：")
+            lines += [f"  · {h['label']}（{h['detail']}）" for h in wl_hits]
+        if fn_hits:
+            lines.append("\n文件名规则命中：")
+            lines += [f"  · {h['label']}（{h['detail']}）" for h in fn_hits]
+        if hits:
+            lines.append("\nOCR 词库命中：")
+            lines += [f"  · {h['label']}" for h in hits]
+        elif text.strip():
+            lines.append("\nOCR 词库未命中任何规则")
+        if not name and not text.strip():
+            lines.append("（请输入文件名或 OCR 文本）")
+        self.t_out.setPlainText("\n".join(lines))
+
     def _add_row(self, t, with_weight):
         r = t.rowCount()
         t.setRowCount(r + 1)
@@ -2559,6 +2923,8 @@ class RuleEditorLite(MessageBoxBase):
         bad = []
         new_rules = {}
         for key, pg in self._pages.items():
+            if "table" not in pg:
+                continue
             t, with_weight, label = pg["table"], pg["weight"], pg["label"]
             rules = []
             for r in range(t.rowCount()):
@@ -2598,6 +2964,154 @@ class RuleEditorLite(MessageBoxBase):
         return True
 
 
+# ================================================================ 扫描历史
+class HistoryDialog(MessageBoxBase):
+    """扫描历史：时间 / 文件夹 / 总数 / 命中 / 耗时（引擎侧 ad_filter_history.json）。"""
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.widget.setFixedWidth(680)
+        self.viewLayout.addWidget(SubtitleLabel("扫描历史", self.widget))
+        tip = CaptionLabel("最近 100 次扫描（新的在前）。规则变化后命中率的变化可在这里对比。", self.widget)
+        tip.setWordWrap(True)
+        self.viewLayout.addWidget(tip)
+
+        from PySide6.QtWidgets import QHeaderView, QTableWidgetItem
+        hist = list(reversed(af.load_history()))
+        t = TableWidget(self.widget)
+        t.setColumnCount(5)
+        t.setHorizontalHeaderLabels(["时间", "文件夹", "扫描总数", "命中（广告/疑似）", "耗时"])
+        t.verticalHeader().setVisible(False)
+        t.setShowGrid(False)
+        t.setBorderVisible(True)
+        t.setBorderRadius(8)
+        t.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        t.setSelectionBehavior(QAbstractItemView.SelectRows)
+        t.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        t.setColumnWidth(0, 150)
+        t.setColumnWidth(2, 90)
+        t.setColumnWidth(3, 150)
+        t.setColumnWidth(4, 76)
+        t.setRowCount(len(hist))
+        for r, h in enumerate(hist):
+            t.setItem(r, 0, QTableWidgetItem(str(h.get("time", ""))))
+            t.setItem(r, 1, QTableWidgetItem("、".join(h.get("roots", []))))
+            t.setItem(r, 2, QTableWidgetItem(str(h.get("total", 0))))
+            t.setItem(r, 3, QTableWidgetItem(
+                f"{h.get('hits', 0)}（{h.get('ad', 0)} / {h.get('suspect', 0)}）"))
+            dur = h.get("duration", 0)
+            t.setItem(r, 4, QTableWidgetItem(f"{dur:.1f}s" if isinstance(dur, (int, float)) else str(dur)))
+        t.setMinimumHeight(300)
+        self.table = t
+        self.viewLayout.addWidget(t)
+        if not hist:
+            self.viewLayout.addWidget(CaptionLabel("还没有扫描记录，跑一次扫描后这里会出现历史。", self.widget))
+        self.yesButton.setVisible(False)
+        self.cancelButton.setText("关闭")
+        self.widget.setMinimumWidth(680)
+
+
+# ================================================================ 隔离区管理
+class QuarantineDialog(MessageBoxBase):
+    """隔离区条目管理：查看 / 还原选中 / 彻底删除选中 / 全部还原。"""
+
+    def __init__(self, app, q_root: Path):
+        super().__init__(app)
+        self.app = app
+        self.q_root = q_root
+        self.widget.setFixedWidth(760)
+        self.viewLayout.addWidget(SubtitleLabel("隔离区管理", self.widget))
+        self.lbl_path = CaptionLabel(str(q_root), self.widget)
+        self.lbl_path.setWordWrap(True)
+        self.viewLayout.addWidget(self.lbl_path)
+
+        from PySide6.QtWidgets import QHeaderView, QTableWidgetItem
+        self._QTI = QTableWidgetItem
+        t = TableWidget(self.widget)
+        t.setColumnCount(4)
+        t.setHorizontalHeaderLabels(["文件", "原位置", "隔离时间", "状态"])
+        t.verticalHeader().setVisible(False)
+        t.setShowGrid(False)
+        t.setBorderVisible(True)
+        t.setBorderRadius(8)
+        t.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        t.setSelectionBehavior(QAbstractItemView.SelectRows)
+        t.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        t.setColumnWidth(0, 200)
+        t.setColumnWidth(2, 140)
+        t.setColumnWidth(3, 76)
+        t.setMinimumHeight(300)
+        self.table = t
+        self.viewLayout.addWidget(t)
+
+        row = QHBoxLayout()
+        self.btn_rs = TransparentPushButton(FIF.BACK_TO_WINDOW, "还原选中", self.widget)
+        self.btn_rs.clicked.connect(self._restore_selected)
+        self.btn_dl = TransparentPushButton(FIF.DELETE, "彻底删除选中", self.widget)
+        self.btn_dl.clicked.connect(self._delete_selected)
+        self.btn_ra = TransparentPushButton("全部还原", self.widget)
+        self.btn_ra.clicked.connect(self._restore_all)
+        self.btn_rf = TransparentPushButton(FIF.SYNC, "刷新", self.widget)
+        self.btn_rf.clicked.connect(self.reload)
+        for b in (self.btn_rs, self.btn_dl, self.btn_ra, self.btn_rf):
+            row.addWidget(b)
+        row.addStretch(1)
+        self.viewLayout.addLayout(row)
+
+        self.yesButton.setVisible(False)
+        self.cancelButton.setText("关闭")
+        self.widget.setMinimumWidth(760)
+        self.reload()
+
+    def reload(self):
+        self.entries = af.list_quarantine(self.q_root)
+        t = self.table
+        t.setRowCount(len(self.entries))
+        for r, e in enumerate(self.entries):
+            dst = e.get("dst", "")
+            it0 = self._QTI(Path(dst).name)
+            it0.setData(Qt.UserRole, dst)
+            t.setItem(r, 0, it0)
+            t.setItem(r, 1, self._QTI(e.get("src", "")))
+            t.setItem(r, 2, self._QTI(e.get("time", "")))
+            t.setItem(r, 3, self._QTI("已隔离" if e.get("exists") else "文件丢失"))
+        self.lbl_path.setText(f"{self.q_root}   ·   {len(self.entries)} 项")
+
+    def _selected_dsts(self):
+        rows = {i.row() for i in self.table.selectedIndexes()}
+        return [self.entries[r]["dst"] for r in sorted(rows) if r < len(self.entries)]
+
+    def _run(self, fn, dsts, verb):
+        if not dsts:
+            return
+        for b in (self.btn_rs, self.btn_dl, self.btn_ra):
+            b.setEnabled(False)
+
+        def work():
+            try:
+                n, errors = fn(self.q_root, dsts, af.log_jsonl)
+            except Exception as e:
+                n, errors = 0, [str(e)]
+            self.app.scan_q.put(("quarantine_op", (verb, n, errors)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _restore_selected(self):
+        self._run(af.restore_quarantine_items, self._selected_dsts(), "还原")
+
+    def _delete_selected(self):
+        dsts = self._selected_dsts()
+        if not dsts:
+            return
+        if not self.app._ask("彻底删除", f"将永久删除隔离区中 {len(dsts)} 个文件，不可恢复！\n继续？"):
+            return
+        self._run(af.delete_quarantine_items, dsts, "删除")
+
+    def _restore_all(self):
+        self._run(af.restore_quarantine_items,
+                  [e["dst"] for e in self.entries], "还原")
+
+
 # ================================================================ 入口
 def run_gui(return_app=False):
     qapp = QApplication.instance() or QApplication(sys.argv)
@@ -2627,10 +3141,11 @@ def gui_func_test() -> int:
               flush=True)
 
     tmp = Path(tempfile.mkdtemp(prefix="adfilter_guitest_"))
-    _c, _cf, _l = af.CACHE_PATH, af.CONFIG_PATH, af.LOG_PATH
+    _c, _cf, _l, _h = af.CACHE_PATH, af.CONFIG_PATH, af.LOG_PATH, af.HISTORY_PATH
     af.CACHE_PATH = tmp / "cache.db"
     af.CONFIG_PATH = tmp / "cfg.json"
     af.LOG_PATH = tmp / "log.jsonl"
+    af.HISTORY_PATH = tmp / "hist.json"
     af.CONFIG_PATH.write_text(json.dumps({"ui_theme": "dark", "workers": 2}), encoding="utf-8")
 
     src_dir = af.APP_DIR / "testdata"
@@ -2950,9 +3465,12 @@ def gui_func_test() -> int:
             check("恢复隔离区", restored_n >= n_before and not rerrs,
                   f"restored={restored_n} errs={rerrs[:2]}")
             check("文件已回原位", (scan_dir / "type1_拼图引流.jpg").exists())
-        # 清理隔离产物
+        # 清理隔离产物（仅当目录里全是本次测试产生的文件，防止误删真实隔离区）
         try:
-            shutil.rmtree(ipath, ignore_errors=True)
+            if ipath.exists():
+                leftovers = [p for p in ipath.rglob("*") if p.is_file() and p.name != "manifest.json"]
+                if not leftovers:
+                    shutil.rmtree(ipath, ignore_errors=True)
         except Exception:
             pass
 
@@ -3016,10 +3534,168 @@ def gui_func_test() -> int:
         check("无效正则拒收", dlg2.do_save() is False)
         dlg2.close()
 
+        # —— 排序 ——
+        app.f_sort.setCurrentIndex(1)  # 名称
+        pump(0.2)
+        names = [Path(it["path"]).name.lower() for it in app.model.items]
+        check("按名称排序", names == sorted(names), names[:3])
+        app.f_sort.setCurrentIndex(4)  # 分数
+        pump(0.2)
+        scores = [it.get("score", 0) for it in app.model.items]
+        check("按分数排序", scores == sorted(scores, reverse=True), scores[:3])
+        app.f_sort.setCurrentIndex(0)
+        pump(0.2)
+
+        # —— 扫描历史 ——
+        hist = af.load_history()
+        check("扫描历史已记录", len(hist) >= 2, f"n={len(hist)}")
+        check("历史记录含耗时与命中",
+              all("duration" in h and "hits" in h for h in hist))
+        dlg_h = HistoryDialog(app)
+        check("历史弹窗行数=记录数", dlg_h.table.rowCount() == len(hist),
+              f"{dlg_h.table.rowCount()} vs {len(hist)}")
+        dlg_h.close()
+
+        # —— 导出报告 ——
+        out_csv = tmp / "report.csv"
+        _orig_save = QFileDialog.getSaveFileName
+        _orig_open = QFileDialog.getOpenFileName
+        QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (str(out_csv), "csv"))
+        try:
+            app.export_report()
+        finally:
+            QFileDialog.getSaveFileName = _orig_save
+        check("导出 CSV 生成", out_csv.exists())
+        if out_csv.exists():
+            rows = out_csv.read_text(encoding="utf-8-sig").strip().splitlines()
+            check("CSV 行数=命中+表头", len(rows) == len(app.model.items) + 1,
+                  f"rows={len(rows)} items={len(app.model.items)}")
+
+        # —— Lightbox 图内处置（保留 / 标记广告）——
+        app.grid.setCurrentIndex(app.model.index(0, 0))
+        p0 = app.model.items[0]["path"]
+        lb2 = Lightbox(app, p0, parent=app)
+        pump(0.3)
+        n_bm = len(app.items)
+        lb2._mark(False)
+        pump(0.2)
+        check("Lightbox 保留移出列表", len(app.items) == n_bm - 1,
+              f"{n_bm}->{len(app.items)}")
+        check("Lightbox 保留后跳到下一张", lb2.path != p0, lb2.path)
+        lb2._mark(True)
+        pump(0.2)
+        check("Lightbox 标记广告=勾选", lb2.path in app.model.checked)
+        try:
+            lb2.close()
+        except RuntimeError:
+            pass
+        pump(0.2)
+
+        # —— 撤销处置（隔离）——
+        app.seg_disposal.set_index(0)
+        app.select_all()
+        pump(0.15)
+        app.execute_disposal()
+        pump(until=lambda: "处置完成" in app.status.text(), timeout=60)
+        check("隔离后撤销按钮可用", app.btn_undo.isEnabled())
+        undo_srcs = list(app._undo_batch[1]) if app._undo_batch else []
+        app.undo_disposal()
+        pump(until=lambda: "恢复" in app.status.text(), timeout=60)
+        check("撤销处置完成", "恢复" in app.status.text(), app.status.text())
+        check("撤销后文件回原位", all(Path(p).exists() for p in undo_srcs) and len(undo_srcs) > 0,
+              f"n={len(undo_srcs)}")
+        ipath2 = Path(Path(str(slow_dir)).anchor) / af.QUARANTINE_NAME
+        try:
+            if ipath2.exists():
+                leftovers = [p for p in ipath2.rglob("*") if p.is_file() and p.name != "manifest.json"]
+                if not leftovers:
+                    shutil.rmtree(ipath2, ignore_errors=True)
+        except Exception:
+            pass
+
+        # —— 隔离区管理对话框（还原选中 / 删除选中）——
+        qtest = tmp / "qtest"
+        qtest.mkdir()
+        (qtest / "a.jpg").write_bytes(b"x")
+        (qtest / "b.jpg").write_bytes(b"y")
+        (qtest / "manifest.json").write_text(json.dumps({"items": [
+            {"src": str(scan_dir / "a.jpg"), "dst": str(qtest / "a.jpg"), "time": "2026-01-01 00:00:00"},
+            {"src": str(scan_dir / "b.jpg"), "dst": str(qtest / "b.jpg"), "time": "2026-01-01 00:00:01"},
+        ]}, ensure_ascii=False), encoding="utf-8")
+        dlg_q = QuarantineDialog(app, qtest)
+        app._qdlg = dlg_q
+        check("隔离区条目加载", dlg_q.table.rowCount() == 2, f"rows={dlg_q.table.rowCount()}")
+        dlg_q.table.selectRow(0)
+        pump(0.1)
+        dlg_q._restore_selected()
+        ok_rs = pump(until=lambda: (scan_dir / "a.jpg").exists(), timeout=10)
+        check("隔离区还原选中", ok_rs and (scan_dir / "a.jpg").exists())
+        pump(0.3)
+        check("还原后清单剩 1 项", dlg_q.table.rowCount() == 1, f"rows={dlg_q.table.rowCount()}")
+        dlg_q.table.selectRow(0)
+        pump(0.1)
+        dlg_q._delete_selected()
+        ok_dl = pump(until=lambda: not (qtest / "b.jpg").exists(), timeout=10)
+        check("隔离区彻底删除选中", ok_dl)
+        app._qdlg = None
+        dlg_q.close()
+
+        # —— 规则测试器 ——
+        dlg3 = app.build_rule_editor()
+        dlg3.pivot.setCurrentItem("tester")
+        pump(0.15)
+        dlg3.t_name.setText("normal.jpg")
+        dlg3.t_in.setPlainText("免费发布 关注我的频道 t.me/demo 扫码关注")
+        dlg3._run_test()
+        out_t = dlg3.t_out.toPlainText()
+        check("测试器判定广告", "广告" in out_t, out_t[:60])
+        check("测试器显示得分", "OCR 得分" in out_t)
+        dlg3.t_in.setPlainText("今天天气不错适合出门")
+        dlg3._run_test()
+        check("测试器判定正常", "正常" in dlg3.t_out.toPlainText(),
+              dlg3.t_out.toPlainText()[:60])
+        pt = dlg3._pages["whitelist_rules"]["table"]
+        r = pt.rowCount()
+        pt.setRowCount(r + 1)
+        pt.setItem(r, 0, _QI("白样本"))
+        pt.setItem(r, 1, _QI("测试白名单"))
+        dlg3.t_name.setText("白样本_01.jpg")
+        dlg3.t_in.setPlainText("t.me/demo 免费发布")
+        dlg3._run_test()
+        check("白名单优先放行", "白名单" in dlg3.t_out.toPlainText(),
+              dlg3.t_out.toPlainText()[:60])
+        dlg3.close()
+
+        # —— 配置导入导出 ——
+        cfg_backup = json.loads(json.dumps(app.cfg))
+        dlg4 = app.build_config()
+        cfg_out = tmp / "cfg_export.json"
+        QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (str(cfg_out), "json"))
+        try:
+            dlg4._export_cfg()
+        finally:
+            QFileDialog.getSaveFileName = _orig_save
+        check("配置导出文件生成", cfg_out.exists())
+        exported = json.loads(cfg_out.read_text(encoding="utf-8")) if cfg_out.exists() else {}
+        check("导出配置含词库", "ocr_keywords" in exported)
+        exported["ocr_keywords"] = exported.get("ocr_keywords", [])[:1]
+        cfg_in = tmp / "cfg_import.json"
+        cfg_in.write_text(json.dumps(exported, ensure_ascii=False), encoding="utf-8")
+        QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (str(cfg_in), "json"))
+        try:
+            dlg4._import_cfg()
+        finally:
+            QFileDialog.getOpenFileName = _orig_open
+        check("导入后词库生效", len(app.cfg.get("ocr_keywords", [])) == 1,
+              f"n={len(app.cfg.get('ocr_keywords', []))}")
+        app.cfg.clear()
+        app.cfg.update(cfg_backup)
+        dlg4.close()
+
     finally:
         app.close()
         qapp.processEvents()
-        af.CACHE_PATH, af.CONFIG_PATH, af.LOG_PATH = _c, _cf, _l
+        af.CACHE_PATH, af.CONFIG_PATH, af.LOG_PATH, af.HISTORY_PATH = _c, _cf, _l, _h
         shutil.rmtree(tmp, ignore_errors=True)
 
     passed = sum(1 for _, ok in results if ok)

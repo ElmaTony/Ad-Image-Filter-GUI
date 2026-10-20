@@ -4,6 +4,7 @@ ad_filter_cache.db-journal
 selftest_cache.db
 bench_cache.db
 ad_filter_log.jsonl
+ad_filter_history.json
 ad_filter_config.json
 *.db-journal
 

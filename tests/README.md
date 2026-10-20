@@ -9,7 +9,7 @@
 
 ```bash
 python ad_filter.py --selftest    # 引擎判定回归（含真实样本，可选）
-python ad_filter.py --gui-test    # GUI 功能自测（76 项）
+python ad_filter.py --gui-test    # GUI 功能自测（100 项）
 ```
 
-**基线**（2026-10-20）：精度 召回 22/22 (100%)、误报 0/22；E2E 37/37；gui-test 76/76。
+**基线**（2026-10-21）：精度 召回 22/22 (100%)、误报 0/22；E2E 37/37；gui-test 100/100。

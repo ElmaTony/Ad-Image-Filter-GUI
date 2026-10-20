@@ -123,13 +123,18 @@ ck("隔离处置完成", ok, app.status.text()[:30])
 ck("处置后列表减少", len(app.items) == n_before - n_checked, f"{n_before}->{len(app.items)}")
 q_root = Path(str(A.anchor)) / af.QUARANTINE_NAME
 ck("隔离目录已创建", q_root.exists())
-# 恢复
+# 恢复（restore_ui 现在是模态隔离区管理对话框；自动化用假对话框替代，
+# 对话框本身的条目化管理由 --gui-test 覆盖）
 import ad_filter_gui as g
 d = QApplication.instance()
-class FakeFileDialog:
-    @staticmethod
-    def getExistingDirectory(*a, **k): return str(q_root)
-g.QFileDialog.getExistingDirectory = FakeFileDialog.getExistingDirectory
+class FakeQuarantineDialog:
+    def __init__(self, app_, qroot):
+        self._app, self._qroot = app_, qroot
+    def exec(self):
+        n, errs = af.restore_quarantine(self._qroot, af.log_jsonl)
+        self._app.scan_q.put(("restored", (n, errs)))
+        return 0
+g.QuarantineDialog = FakeQuarantineDialog
 app.restore_ui()
 ok = wait(lambda: not app._disposing and "恢复" in app.status.text(), 60)
 ck("从隔离区恢复", ok, app.status.text()[:30])
