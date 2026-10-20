@@ -311,6 +311,24 @@ def bright_pass(crop: Image.Image, thr: int) -> Image.Image:
     return im.filter(ImageFilter.MaxFilter(3))
 
 
+def is_blank_image(img: Image.Image) -> bool:
+    """近乎纯色（灰度标准差 < 3）：不可能含可读文字，跳过 QR/OCR 完全无损。
+    实测：纯色图 std=0.00，真实照片最低 10.1（横条贴片）。"""
+    import numpy as np
+
+    g = np.asarray(img.convert("L").resize((160, 120)), dtype=np.float32)
+    return float(g.std()) < 3.0
+
+
+def bright_mask_ratio(img: Image.Image, thr: int) -> float:
+    """高亮+低饱和像素占比：即 bright_pass 会保留的"笔画"面积。
+    占比趋近 0 时提亮结果是整片白色，跑 OCR 不可能识别出任何文字（可安全跳过）。"""
+    import numpy as np
+
+    hsv = np.asarray(img.convert("HSV"))
+    return float(((hsv[:, :, 2] >= thr) & (hsv[:, :, 1] <= 70)).mean())
+
+
 def load_pixel_image(path: Path, max_dim: int) -> Image.Image:
     """为 QR/OCR 加载像素；JPEG 走 draft 快速降采样解码。
     必须 with：Image.open 持有文件句柄，扫描几千张不关闭会耗尽句柄/锁住文件。"""
@@ -429,12 +447,20 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
             reasons.append({"type": "error", "label": f"解码失败 {e}"})
             verdict, score = "error", 0
 
+        # 近乎纯色 → 不可能有文字/二维码，直接放过（无损跳过全部像素级识别）
+        if img is not None and verdict == "clean" and is_blank_image(img):
+            reasons.append({"type": "blank", "label": "近乎纯色图（跳过识别）"})
+            result = {"path": str(path), "verdict": "clean", "score": 0,
+                      "reasons": [], "ocr_text": ""}
+            cache.put(str(path), size, mtime, "clean", 0, [], "")
+            return result
+
         if img is not None and verdict == "clean" and enable.get("qr"):
             try:
                 # QR 检测在 1400px 小图上跑（实测 2200px 需要 140ms，1400px 仅 18ms）；
                 # 缩图只见图形解不出内容时用原图重试一次
                 qr_img = img
-                if max(img.size) > 1400:
+                if max(img.size) > 1100:
                     qr_img = ImageOps.contain(img, (1100, 1100))
                 decoded, seen = detect_qr(qr_img)
                 if seen and not decoded and qr_img is not img:
@@ -454,7 +480,19 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
             try:
                 W, H = img.size
                 strip = int(H * cfg["ocr"]["strip_ratio"])
-                regions = [img.crop((0, 0, W, max(24, strip))), img.crop((0, max(0, H - strip), W, H))]
+                if max(W, H) <= 1000:
+                    # 小图：整张就是"条带"，跳过裁切（少 2 次 OCR）
+                    regions = [img]
+                else:
+                    # 上下条带垂直拼接成一张图（16px 白缝防跨缝连字）：
+                    # 原来两条带 × (原图+提亮) = 4 次推理，拼接后只需 2 次
+                    top = img.crop((0, 0, W, max(24, strip)))
+                    bot = img.crop((0, max(0, H - strip), W, H))
+                    gap = 16
+                    combo = Image.new("RGB", (W, top.height + gap + bot.height), (255, 255, 255))
+                    combo.paste(top, (0, 0))
+                    combo.paste(bot, (0, top.height + gap))
+                    regions = [combo]
                 texts: list[str] = []
                 hits_left: list[dict] = []
                 ocr_score, joined = 0.0, ""
@@ -467,6 +505,9 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
                     if ocr_score >= cfg["ocr"]["score_high"]:
                         return acc, True
                     for thr in cfg["ocr"]["bright_thresholds"]:
+                        # 提亮门控：高亮笔画占比 <0.05% 时提亮结果几乎全白，OCR 无意义（无损跳过）
+                        if bright_mask_ratio(reg, thr) < 0.0005:
+                            continue
                         acc += _ocr_ndarray(bright_pass(reg, thr))
                         hits_left, ocr_score, joined = score_ocr_texts(acc, cfg["ocr_keywords"])
                         if ocr_score >= cfg["ocr"]["score_high"]:

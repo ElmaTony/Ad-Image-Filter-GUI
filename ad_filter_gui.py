@@ -15,14 +15,15 @@ from pathlib import Path
 
 import ad_filter as af
 
-from PySide6.QtCore import (QAbstractListModel, QEvent, QModelIndex, QObject, QRect, QSize,
+from PySide6.QtCore import (QAbstractListModel, Property, QEvent, QModelIndex, QObject, QRect, QSize,
                             Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QImage, QPainter,
+from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QImage,
+                          QLinearGradient, QPainter,
                            QPen, QPixmap)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout,
                                QLabel, QListView, QListWidgetItem, QMenu, QPushButton,
-                               QStackedWidget, QStyledItemDelegate, QToolButton,
-                               QVBoxLayout, QWidget)
+                               QGraphicsOpacityEffect, QStackedWidget,
+                               QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget)
 
 from qfluentwidgets import (CaptionLabel, CheckBox, ComboBox, FluentIcon as FIF, InfoBar,
                             InfoBarPosition, ListWidget, MessageBox, MessageBoxBase, Pivot,
@@ -33,7 +34,7 @@ from qfluentwidgets import (CaptionLabel, CheckBox, ComboBox, FluentIcon as FIF,
 from qframelesswindow import FramelessWindow
 
 VERDICT_TEXT = {"ad": "广告", "suspect": "疑似", "error": "异常"}
-CARD_W, CARD_H = 196, 216
+CARD_W, CARD_H = 196, 234
 
 
 def _c(dark_hex, light_hex):
@@ -42,8 +43,8 @@ def _c(dark_hex, light_hex):
 
 def _verdict_color(verdict: str) -> QColor:
     if isDarkTheme():
-        return QColor({"ad": "#f08a72", "suspect": "#e6b445", "error": "#c99ad4"}.get(verdict, "#a3a098"))
-    return QColor({"ad": "#b3402a", "suspect": "#9a6a12", "error": "#8f4a99"}.get(verdict, "#6f6d66"))
+        return QColor({"ad": "#e08264", "suspect": "#e6b445", "error": "#c99ad4"}.get(verdict, "#a3a098"))
+    return QColor({"ad": "#c6613f", "suspect": "#9a6a12", "error": "#8f4a99"}.get(verdict, "#6f6d66"))
 
 
 # ================================================================ 缩略图缓存
@@ -113,7 +114,7 @@ class ThumbCache(QObject):
         qimg = QImage(buf, w, h, w * 3, QImage.Format_RGB888).copy()
         pm = QPixmap.fromImage(qimg)
         # 预缩放到卡片显示尺寸：委托 paint 每帧 scaled 会被滚动放大成 CPU 热点
-        pm = pm.scaled(CARD_W - 16, CARD_H - 46, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pm = pm.scaled(CARD_W - 16, CARD_H - 62, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         with self._lock:
             self._cache[path] = pm
             while len(self._cache) > self._max:
@@ -178,6 +179,18 @@ class CardDelegate(QStyledItemDelegate):
         self._fm_name = QFontMetrics(self._f_name)
         self._fm_reason = QFontMetrics(self._f_reason)
         self._fm_badge = QFontMetrics(self._f_badge)
+        self._birth: dict = {}   # path -> 出生时刻（入场动画用）
+
+    def note_birth(self, paths):
+        now = time.time()
+        for x in paths:
+            self._birth[x] = now
+        self._prune_birth()
+
+    def _prune_birth(self):
+        now = time.time()
+        if len(self._birth) > 512:
+            self._birth = {k: v for k, v in self._birth.items() if now - v < 0.3}
 
     @staticmethod
     def _elide_bidir(name, fm, width):
@@ -196,6 +209,21 @@ class CardDelegate(QStyledItemDelegate):
         it = self.model.items[idx.row()]
         p.save()
         p.setRenderHint(QPainter.Antialiasing)
+        # —— 入场动画（CDS file-thumbnail-grow-in）：250ms scale 0.85→1 + 渐显 ——
+        born = self._birth.get(it["path"])
+        if born is not None:
+            age = time.time() - born
+            if age < 0:
+                p.restore()
+                return
+            if age < 0.25:
+                k = age / 0.25
+                p.setOpacity(k)
+                s = 0.85 + 0.15 * k
+                c = opt.rect.center()
+                p.translate(c.x(), c.y())
+                p.scale(s, s)
+                p.translate(-c.x(), -c.y())
         r = QRect(opt.rect).adjusted(5, 5, -5, -5)
         from PySide6.QtWidgets import QStyle
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)
@@ -205,9 +233,13 @@ class CardDelegate(QStyledItemDelegate):
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(0, 0, 0, 26) if isDarkTheme() else QColor(0, 0, 0, 14))
             p.drawRoundedRect(QRect(r.left() + 1, r.top() + 3, r.width(), r.height()), 10, 10)
-        p.setBrush(_c("#1a1a19", "#ffffff"))
-        p.setPen(QPen(_c("#8a7a6a", "#b9b2a4") if selected else
-                      (_c("#3a3a37", "#dedbd2") if hovered else _c("#2a2a28", "#e7e4dc")),
+        # 选中：陶土 wash 底（品牌色渗透——一眼可辨的选中群组）
+        if selected:
+            p.setBrush(QColor(217, 119, 87, 26) if isDarkTheme() else QColor(198, 97, 63, 18))
+        else:
+            p.setBrush(_c("#1a1a19", "#ffffff"))
+        p.setPen(QPen(_c("#e08264", "#c6613f") if selected else
+                      (_c("#5a463c", "#d8c3b5") if hovered else _c("#2a2a28", "#e7e4dc")),
                       1.6 if selected else 1))
         p.drawRoundedRect(r, 10, 10)
         # 选中双环：外环 clay 1.5px + 内环 surface-1 1px（CDS 双环聚焦协议）
@@ -215,31 +247,44 @@ class CardDelegate(QStyledItemDelegate):
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(_c("#d97757", "#c6613f"), 1.5))
             p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 11, 11)
-            p.setPen(QPen(_c("#151515", "#fcfcfb"), 1))
+            p.setPen(QPen(_c("#3d2620", "#f7e8e0"), 1))
             p.drawRoundedRect(r.adjusted(2, 2, -2, -2), 8, 8)
-        img_r = QRect(r.left() + 8, r.top() + 8, r.width() - 16, r.height() - 46)
+        img_r = QRect(r.left() + 8, r.top() + 8, r.width() - 16, r.height() - 62)
         pix = self.thumbs.get(it["path"])
         if pix is not None and not pix.isNull():
             # 缓存里已按卡片尺寸预缩放，直接贴（避免每帧 SmoothTransformation）
             p.drawPixmap(img_r.left() + (img_r.width() - pix.width()) // 2,
                          img_r.top() + (img_r.height() - pix.height()) // 2, pix)
         else:
-            p.setPen(QPen(_c("#666666", "#8a8a8a")))
-            p.drawText(img_r, Qt.AlignCenter, "…")
+            # —— 骨架屏 + 105° 倾角扫光（CDS cds-skeleton-sweep：2.0s 线性循环）——
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#20201f" if isDarkTheme() else "#f0efec"))
+            p.drawRoundedRect(img_r, 8, 8)
+            t = (time.time() % 2.0) / 2.0
+            w = img_r.width()
+            gx = img_r.left() - w + t * 2.0 * w
+            g = QLinearGradient(gx, img_r.top(), gx + w * 0.35, img_r.bottom())
+            sheen = QColor(217, 119, 87, 22) if isDarkTheme() else QColor(198, 97, 63, 14)
+            g.setColorAt(0.0, QColor(0, 0, 0, 0))
+            g.setColorAt(0.35, QColor(0, 0, 0, 0))
+            g.setColorAt(0.50, sheen)
+            g.setColorAt(0.65, QColor(0, 0, 0, 0))
+            g.setColorAt(1.0, QColor(0, 0, 0, 0))
+            p.fillRect(img_r, QBrush(g))
         p.setPen(Qt.NoPen)
         p.setBrush(_verdict_color(it["verdict"]))
         p.drawRoundedRect(QRect(r.left() + 34, r.top() + 4, 30, 3), 1.5, 1.5)
         # 文件名（双向截断：扩展名永远保留）+ 右上类型徽标
         name = self._elide_bidir(Path(it["path"]).name, self._fm_name, r.width() - 20)
-        p.setPen(_c("#f5f5f5", "#151515"))
+        p.setPen(_c("#e08264", "#c6613f") if selected else _c("#f5f5f5", "#151515"))
         p.setFont(self._f_name)
-        p.drawText(QRect(r.left() + 10, r.bottom() - 34, r.width() - 20, 16),
+        p.drawText(QRect(r.left() + 10, r.bottom() - 50, r.width() - 20, 16),
                    Qt.AlignLeft | Qt.AlignVCenter, name)
         ext = Path(it["path"]).suffix.lstrip(".").upper()
         if ext:
             btxt = self._fm_badge.elidedText(ext, Qt.ElideRight, 34)
             bw = self._fm_badge.horizontalAdvance(btxt) + 10
-            br = QRect(r.right() - bw - 8, r.bottom() - 33, bw, 15)
+            br = QRect(r.right() - bw - 8, r.bottom() - 49, bw, 15)
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(0, 0, 0, 96) if isDarkTheme() else QColor(20, 20, 20, 24))
             p.drawRoundedRect(br, 4, 4)
@@ -250,8 +295,19 @@ class CardDelegate(QStyledItemDelegate):
                                             Qt.ElideRight, r.width() - 20)
         p.setPen(_verdict_color(it["verdict"]))
         p.setFont(self._f_reason)
-        p.drawText(QRect(r.left() + 10, r.bottom() - 18, r.width() - 20, 13),
+        p.drawText(QRect(r.left() + 10, r.bottom() - 32, r.width() - 20, 13),
                    Qt.AlignLeft | Qt.AlignVCenter, reason)
+        # 来源文件夹行（📁 根文件夹名/子目录）
+        folder = it.get("_folder") or ""
+        if folder:
+            ftext = self._fm_reason.elidedText(folder, Qt.ElideMiddle, r.width() - 30)
+            p.setPen(_c("#7a7a7a", "#7a7a7a"))
+            p.setFont(self._f_reason)
+            # 小文件夹图标 + 名称
+            p.drawText(QRect(r.left() + 10, r.bottom() - 17, 12, 13),
+                       Qt.AlignLeft | Qt.AlignVCenter, "📁")
+            p.drawText(QRect(r.left() + 23, r.bottom() - 17, r.width() - 33, 13),
+                       Qt.AlignLeft | Qt.AlignVCenter, ftext)
         cr = QRect(r.left() + 8, r.top() + 8, 22, 22)
         checked = it["path"] in self.model.checked
         if checked:
@@ -343,10 +399,13 @@ class FolderBar(QWidget):
         self._box.setSpacing(6)
         lay.addLayout(self._box)
         lay.addStretch(1)
+        self.wave = WaveDots(self)
+        self.wave.hide()
         self.lbl_current = QLabel("", self)
         self.lbl_current.setObjectName("currentFile")
         self.lbl_current.setFixedWidth(300)
         self.lbl_current.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lay.addWidget(self.wave)
         lay.addWidget(self.lbl_current)
         self.progress = ProgressBar(self)
         self.progress.setFixedWidth(120)
@@ -387,6 +446,9 @@ class FolderBar(QWidget):
         # 当前扫描的文件（文件夹 / 文件名），扫描结束清空
         cur_path = getattr(self.app, "_current_file", None)
         if cur_path and self.app.scan_thread and self.app.scan_thread.is_alive():
+            if not self.wave.isVisible():
+                self.wave.show()
+                self.wave.start()
             root = self.app._current_root or ""
             root_name = Path(root).name if root else ""
             fname = Path(cur_path).name
@@ -395,6 +457,8 @@ class FolderBar(QWidget):
             self.lbl_current.setText(fm.elidedText(text, Qt.ElideMiddle, 292))
             self.lbl_current.setToolTip(str(cur_path))
         else:
+            self.wave.stop()
+            self.wave.hide()
             self.lbl_current.setText("")
             self.lbl_current.setToolTip("")
 
@@ -428,6 +492,80 @@ class FolderBar(QWidget):
             self.lbl_pct.setText("")
 
 
+# ================================================================ 标题栏（Windows 风格）
+class TitleBar(QWidget):
+    """自绘标题栏：左留白可拖拽、品牌正中、右上最小化/最大化/关闭（Windows 习惯）。"""
+
+    def __init__(self, win, parent=None):
+        super().__init__(parent)
+        self._win = win
+        self.setObjectName("titleBar")
+        self.setFixedHeight(38)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        # 右侧按钮（46x32，Windows 顺序：最小化 / 最大化 / 关闭）
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(16, 0, 0, 0)   # 左对齐：Windows 习惯（图标+标题在左，按钮在右）
+        lay.setSpacing(9)
+        self.logo = QLabel(self)
+        self.logo.setObjectName("titleLogo")
+        self.logo.setFixedSize(15, 15)
+        lay.addWidget(self.logo)
+        self.brand = QLabel("", self)
+        self.brand.setObjectName("titleBrand")
+        lay.addWidget(self.brand)
+        lay.addStretch(1)
+        self.btn_min = self._mk_btn("—", "最小化")
+        self.btn_min.clicked.connect(win.showMinimized)
+        self.btn_max = self._mk_btn("☐", "最大化 / 还原")
+        self.btn_max.clicked.connect(self._toggle_max)
+        self.btn_close = self._mk_btn("✕", "关闭")
+        self.btn_close.setObjectName("titleClose")
+        self.btn_close.clicked.connect(win.close)
+        for b in (self.btn_min, self.btn_max, self.btn_close):
+            lay.addWidget(b)
+    def _mk_btn(self, text, tip):
+        from PySide6.QtWidgets import QPushButton
+        b = QPushButton(text, self)
+        b.setObjectName("titleBtn")
+        b.setFixedSize(42, 26)
+        b.setToolTip(tip)
+        b.setCursor(Qt.ArrowCursor)
+        b.setFocusPolicy(Qt.NoFocus)
+        return b
+
+    def _toggle_max(self):
+        if self._win.isMaximized():
+            self._win.showNormal()
+            self.btn_max.setText("☐")
+        else:
+            self._win.showMaximized()
+            self.btn_max.setText("❐")
+
+    def mouseDoubleClickEvent(self, e):
+        self._toggle_max()
+
+    def apply_theme(self, dark, clay, base):
+        bg = "#0b0b0b" if dark else "#f9f9f7"
+        border = "rgba(217,119,87,0.16)" if dark else "rgba(198,97,63,0.22)"
+        self.setStyleSheet(
+            f"#titleBar {{ background: {bg}; border-bottom: 1px solid {border}; }}"
+            f"#titleBtn {{ background: transparent; border: none; color: {'#a3a3a3' if dark else '#525252'};"
+            f" font-size: 13px; font-family: 'Segoe UI', 'Microsoft YaHei UI'; }}"
+            f"#titleBtn:hover {{ background: {'rgba(255,255,255,0.08)' if dark else 'rgba(0,0,0,0.06)'}; }}"
+            f"#titleClose:hover {{ background: #c42b1c; color: #ffffff; }}")
+        self.brand.setStyleSheet(
+            'font-family: "Microsoft YaHei UI", "Segoe UI";'
+            f"font-size: 13px; font-weight: 600; letter-spacing: 0.3px; color: {base};"
+            "background: transparent;")
+        self.brand.setText(f'<span style="color:{clay};">广告</span>图过滤')
+        # 陶土色品牌小方块（应用标识）
+        self.logo.setStyleSheet(
+            f"background: {clay}; border-radius: 4px; color: #ffffff;"
+            ' font-family: "Microsoft YaHei UI"; font-size: 10px; font-weight: 700;')
+        self.logo.setAlignment(Qt.AlignCenter)
+        self.logo.setText("广")
+
+
 # ================================================================ CDS 组件
 class Lightbox(QWidget):
     """画廊查看器（按 CDS 逆向物理常数）：
@@ -457,21 +595,46 @@ class Lightbox(QWidget):
         self._dragging = False
         self._drag_tx0 = self._drag_ty0 = 0.0
         self._press_pos = None
+        self._enter = 1.0   # 入场动画进度（showEvent 里从 0 渐到 1）
         self._load(path)
         # 覆盖主窗口
         if parent is not None:
             self.resize(parent.size())
         self.setFocusPolicy(Qt.StrongFocus)
         self.show()
+        self._play_enter()
+
+    def _play_enter(self):
+        """入场：backdrop 200ms 淡入 + 内容 250ms scale-in（CDS lightbox 关键帧）。"""
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+        self._enter = 0.0
+        self._enter_anim = QPropertyAnimation()
+        self._enter_anim.setPropertyName(b"enter")
+        self._enter_anim.setTargetObject(self)
+        self._enter_anim.setStartValue(0.0)
+        self._enter_anim.setEndValue(1.0)
+        self._enter_anim.setDuration(250)
+        self._enter_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._enter_anim.valueChanged.connect(lambda _v: self.update())
+        self._enter_anim.start(QPropertyAnimation.DeleteWhenStopped)
+
+    def get_enter(self):
+        return self._enter
+
+    def set_enter(self, v):
+        self._enter = v
+        self.update()
+
+    enter = Property(float, get_enter, set_enter)
 
     def _load(self, path):
         self.path = path
-        from PIL import Image as _Im
+        from PIL import Image as _Im, ImageOps as _IO
         try:
             with _Im.open(path) as im:
                 img = im.convert("RGB")
             if max(img.size) > 2400:
-                img = ImageOps.contain(img, (2400, 2400))
+                img = _IO.contain(img, (2400, 2400))
             rgb = img.convert("RGB")
             qimg = QImage(rgb.tobytes(), rgb.width, rgb.height, rgb.width * 3,
                           QImage.Format_RGB888).copy()
@@ -497,8 +660,8 @@ class Lightbox(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        # backdrop
-        p.fillRect(self.rect(), QColor(11, 11, 11, 240))
+        # backdrop（入场前 200ms 淡入：alpha 按 enter*1.25 截断到 1）
+        p.fillRect(self.rect(), QColor(11, 11, 11, int(240 * min(1.0, self._enter * 1.25))))
         if not self._pix or self._pix.isNull():
             p.setPen(QColor("#a3a3a3"))
             p.drawText(self.rect(), Qt.AlignCenter, "无法加载图片")
@@ -511,10 +674,14 @@ class Lightbox(QWidget):
         cy = self.height() / 2 + self.ty
         p.save()
         p.translate(cx, cy)
-        p.scale(self.scale, self.scale)
+        # 内容入场（250ms scale 0.92→1 + 渐显，官方 lightbox-content-in）
+        es = 0.92 + 0.08 * self._enter
+        p.setOpacity(max(0.0, min(1.0, self._enter * 1.2)))
+        p.scale(self.scale * es, self.scale * es)
         p.drawPixmap(int(-self._fit_w / 2), int(-self._fit_h / 2),
                      int(self._fit_w), int(self._fit_h), self._pix)
         p.restore()
+        p.setOpacity(1.0)
         self._draw_chrome(p)
 
     def _draw_chrome(self, p):
@@ -638,6 +805,7 @@ class Lightbox(QWidget):
         items = self.app.model.items
         if not items:
             return
+        # 切换图片时轻量重放入场（80ms 快速淡入）
         try:
             idx = next(i for i, x in enumerate(items) if x["path"] == self.path)
         except StopIteration:
@@ -645,6 +813,8 @@ class Lightbox(QWidget):
         idx = max(0, min(len(items) - 1, idx + delta))
         self.app.grid.setCurrentIndex(self.app.model.index(idx, 0))
         self._load(items[idx]["path"])
+        self._play_enter()
+        self._enter_anim.setDuration(80)
 
     def keyPressEvent(self, e):
         k = e.key()
@@ -748,7 +918,20 @@ class Segmented(QWidget):
         from PySide6.QtCore import QPropertyAnimation, QRectF
         if animate and hasattr(self, "_anim"):
             self._anim.stop()
-        self._indicator.setGeometry(int(x), 2, int(w), self.height() - 4)
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+        if animate:
+            if not hasattr(self, "_slide"):
+                self._slide = None
+            if self._slide is not None:
+                self._slide.stop()
+            self._slide = QPropertyAnimation(self._indicator, b"geometry")
+            self._slide.setDuration(300)   # CDS ease-snap 档
+            self._slide.setEasingCurve(QEasingCurve.OutCubic)
+            self._slide.setStartValue(self._indicator.geometry())
+            self._slide.setEndValue(QRect(int(x), 2, int(w), self.height() - 4))
+            self._slide.start(QPropertyAnimation.DeleteWhenStopped)
+        else:
+            self._indicator.setGeometry(int(x), 2, int(w), self.height() - 4)
         # 按钮文字态
         from qfluentwidgets import setCustomStyleSheet
         if isDarkTheme():
@@ -767,6 +950,89 @@ class Segmented(QWidget):
 
     def refresh_theme(self):
         self._apply_style()
+
+
+class WaveDots(QWidget):
+    """思考三点波浪（CDS timeline-quiet-dots）：1.9s 周期、3px 点、相位差 0.15s、
+    轨迹 y +2 → -2.5 → 0、透明度按关键帧分段。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(26, 14)
+        self._t0 = time.time()
+        self._timer = QTimer(self)
+        self._timer.setInterval(50)
+        self._timer.timeout.connect(lambda: self.update())
+
+    def start(self):
+        self._t0 = time.time()
+        self._timer.start()
+        self.update()
+
+    def stop(self):
+        self._timer.stop()
+        self.update()
+
+    @staticmethod
+    def _interp(ph):
+        """官方关键帧：0-8% op0/y+2；22% op1/y-2.5；36-70% op1/y0；90-100% op0/y0。"""
+        if ph < 0.08:
+            return 0.0, 2.0
+        if ph < 0.22:
+            k = (ph - 0.08) / 0.14
+            return k, 2.0 - 4.5 * k
+        if ph < 0.36:
+            k = (ph - 0.22) / 0.14
+            return 1.0, -2.5 + 2.5 * k
+        if ph < 0.70:
+            return 1.0, 0.0
+        if ph < 0.90:
+            return 1.0 - (ph - 0.70) / 0.20, 0.0
+        return 0.0, 0.0
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        c = QColor("#d97757")
+        now = time.time()
+        for i in range(3):
+            ph = ((now - self._t0) % 1.9) / 1.9
+            ph_i = (ph - i * (0.15 / 1.9)) % 1.0
+            op, dy = self._interp(ph_i)
+            col = QColor(c)
+            col.setAlpha(int(255 * max(0.0, min(1.0, op))))
+            p.setBrush(col)
+            cy = 7 + dy
+            p.drawEllipse(4 + i * 8, int(cy - 1.5), 3, 3)
+
+
+class ScrollFade(QWidget):
+    """滚动渐隐遮罩（CDS 7 档非线性 alpha 阶梯，贴合人眼幂律）。"""
+
+    STOPS = [(0.15, 0.051), (0.30, 0.149), (0.45, 0.302),
+             (0.60, 0.502), (0.75, 0.702), (0.87, 0.851), (1.00, 1.000)]
+
+    def __init__(self, edge, parent=None):
+        super().__init__(parent)
+        self._edge = edge  # "top" | "bottom"
+        self.setFixedHeight(28)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_StyledBackground, False)
+
+    def paintEvent(self, _e):
+        base = QColor("#151515" if isDarkTheme() else "#fcfcfb")
+        p = QPainter(self)
+        p.setPen(Qt.NoPen)
+        if self._edge == "top":
+            g = QLinearGradient(0, self.height(), 0, 0)  # 底(透明) -> 顶(实)
+        else:
+            g = QLinearGradient(0, 0, 0, self.height())
+        for pos, a in self.STOPS:
+            c = QColor(base)
+            c.setAlphaF(a)
+            g.setColorAt(1.0 - pos, c)
+        p.fillRect(self.rect(), QBrush(g))
 
 
 class StatusDot(QWidget):
@@ -831,8 +1097,12 @@ class App(FramelessWindow):
         self.resize(min(1500, scr.width() - 80) if scr else 1460,
                     min(940, scr.height() - 100) if scr else 920)
         self.setMinimumSize(1080, 680)
-        from qfluentwidgets import FluentTitleBar
-        self.setTitleBar(FluentTitleBar(self))
+        if scr is not None:
+            # 窗口居中（默认 pop 位置可能出现在屏幕右下，遮挡正在用的内容）
+            self.move(scr.x() + (scr.width() - self.width()) // 2,
+                      scr.y() + (scr.height() - self.height()) // 2)
+        self._titlebar = TitleBar(self)
+        self.setTitleBar(self._titlebar)
         self.setAcceptDrops(True)
 
         self.items: list = []
@@ -881,6 +1151,10 @@ class App(FramelessWindow):
         self._thumb_timer.setInterval(150)
         self._thumb_timer.timeout.connect(self._flush_thumb_update)
         self.thumbs.ready.connect(self._on_thumb_ready)
+        # 骨架扫光驱动：仅存在 pending 缩略图时跑（空闲零开销）
+        self._sweep_timer = QTimer(self)
+        self._sweep_timer.setInterval(50)
+        self._sweep_timer.timeout.connect(lambda: self.grid.viewport().update())
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_queue)
         self._timer.start(120)
@@ -891,10 +1165,10 @@ class App(FramelessWindow):
             self.setStyleSheet("""
                 /* CDS 真实令牌：surface-1 主画布 / surface-0 侧栏底层 / surface-2 卡片 / surface-3 高层 */
                 #mainWindow { background: #151515; }
-                #topBar { background: #0b0b0b; border-bottom: 1px solid rgba(255,255,255,0.09); }
-                #bottomBar { background: #0b0b0b; border-top: 1px solid rgba(255,255,255,0.09); }
-                #detailPanel { background: #1a1a19; border-left: 1px solid rgba(255,255,255,0.09); }
-                #folderBar { background: #101010; border-bottom: 1px solid rgba(255,255,255,0.07); }
+                #topBar { background: #0b0b0b; border-bottom: 1px solid rgba(217,119,87,0.16); }
+                #bottomBar { background: #0b0b0b; border-top: 1px solid rgba(217,119,87,0.16); }
+                #detailPanel { background: #1a1a19; border-left: 1px solid rgba(217,119,87,0.12); }
+                #folderBar { background: #101010; border-bottom: 1px solid rgba(217,119,87,0.10); }
                 #folderChip {
                     background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.09);
                     border-radius: 6px;
@@ -908,19 +1182,24 @@ class App(FramelessWindow):
                 #folderChip[done="true"] { background: rgba(143,188,143,0.12); border-color: rgba(143,188,143,0.45); }
                 #folderChip[done="true"] QLabel { color: #a8cf9f; }
                 #folderChip[active="true"] {
-                    border-color: rgba(217,119,87,0.85); background: rgba(217,119,87,0.10);
+                    border-color: rgba(217,119,87,0.85); background: rgba(217,119,87,0.16);
                 }
                 #folderChip[active="true"] QLabel { color: #f0b39a; }
                 #folderHint { color: #666666; font-size: 12px; }
                 #currentFile { color: #a3a3a3; font-size: 12px; }
+                QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
+                QScrollBar::handle:vertical { background: rgba(217,119,87,0.30); border-radius: 5px; min-height: 40px; }
+                QScrollBar::handle:vertical:hover { background: rgba(217,119,87,0.50); }
+                QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+                QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
             """)
         else:
             self.setStyleSheet("""
                 #mainWindow { background: #fcfcfb; }
-                #topBar { background: #f9f9f7; border-bottom: 1px solid rgba(20,20,20,0.10); }
-                #bottomBar { background: #f9f9f7; border-top: 1px solid rgba(20,20,20,0.10); }
-                #detailPanel { background: #ffffff; border-left: 1px solid rgba(20,20,20,0.10); }
-                #folderBar { background: #f6f6f4; border-bottom: 1px solid rgba(20,20,20,0.07); }
+                #topBar { background: #f9f9f7; border-bottom: 1px solid rgba(198,97,63,0.22); }
+                #bottomBar { background: #f9f9f7; border-top: 1px solid rgba(198,97,63,0.22); }
+                #detailPanel { background: #ffffff; border-left: 1px solid rgba(198,97,63,0.18); }
+                #folderBar { background: #f6f6f4; border-bottom: 1px solid rgba(198,97,63,0.14); }
                 #folderChip {
                     background: #ffffff; border: 1px solid rgba(20,20,20,0.10);
                     border-radius: 6px;
@@ -934,22 +1213,29 @@ class App(FramelessWindow):
                 #folderChip[done="true"] { background: rgba(61,122,74,0.08); border-color: rgba(61,122,74,0.35); }
                 #folderChip[done="true"] QLabel { color: #3d7a4a; }
                 #folderChip[active="true"] {
-                    border-color: rgba(193,95,60,0.8); background: rgba(193,95,60,0.07);
+                    border-color: rgba(193,95,60,0.8); background: rgba(198,97,63,0.12);
                 }
                 #folderChip[active="true"] QLabel { color: #8a5a44; }
                 #folderHint { color: #8a8a8a; font-size: 12px; }
                 #currentFile { color: #525252; font-size: 12px; }
+                QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
+                QScrollBar::handle:vertical { background: rgba(198,97,63,0.28); border-radius: 5px; min-height: 40px; }
+                QScrollBar::handle:vertical:hover { background: rgba(198,97,63,0.45); }
+                QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+                QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
             """)
         self._apply_brand_style()
         self._apply_info_bg()
         if hasattr(self, "log"):
             self._apply_log_bg()
+        if hasattr(self, "seg_disposal"):
+            self.seg_disposal.refresh_theme()   # 分段胶囊轨道/滑块/文字随主题重建
 
     def _apply_brand_style(self):
-        color = "#f5f5f5" if isDarkTheme() else "#151515"
-        self.brand.setStyleSheet(
-            'font-family: Georgia, "Times New Roman", "Songti SC", "SimSun", serif;'
-            f"font-size: 19px; font-weight: 600; letter-spacing: 0.5px; color: {color};")
+        # 品牌在 TitleBar 内置（双色字 + 主题同步）
+        clay = "#e08264" if isDarkTheme() else "#c6613f"
+        base = "#f5f5f5" if isDarkTheme() else "#151515"
+        self._titlebar.apply_theme(isDarkTheme(), clay, base)
 
     def _apply_log_bg(self):
         from qfluentwidgets import setCustomStyleSheet
@@ -968,6 +1254,11 @@ class App(FramelessWindow):
         setCustomStyleSheet(self.info, qss, qss)
 
     def toggle_theme(self):
+        # —— 主题切换 cross-fade：先抓旧画面，切换后旧画面渐隐、新主题透出 ——
+        old_img = QImage(self.width(), self.height(), QImage.Format_ARGB32_Premultiplied)
+        old_img.fill(Qt.transparent)
+        self.render(old_img)
+        old_pix = QPixmap.fromImage(old_img.copy())
         new = Theme.LIGHT if isDarkTheme() else Theme.DARK
         setTheme(new)
         self.theme = "dark" if new == Theme.DARK else "light"
@@ -975,6 +1266,23 @@ class App(FramelessWindow):
         af.save_config(self.cfg)
         self._apply_theme()
         self.grid.viewport().update()
+        # 覆盖层：旧主题截图，360ms 平滑淡出（InOutCubic，双方向都柔和）
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+        overlay = QLabel(self)
+        overlay.setPixmap(old_pix)
+        overlay.setGeometry(0, 0, self.width(), self.height())
+        overlay.setAttribute(Qt.WA_TransparentForMouseEvents)
+        overlay.raise_()
+        eff = QGraphicsOpacityEffect(overlay)
+        eff.setOpacity(1.0)
+        overlay.setGraphicsEffect(eff)
+        anim = QPropertyAnimation(eff, b"opacity", self)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setDuration(360)
+        anim.setEasingCurve(QEasingCurve.InOutCubic)
+        anim.finished.connect(overlay.deleteLater)
+        anim.start(QPropertyAnimation.DeleteWhenStopped)
         return self
 
     # ---------- UI ----------
@@ -990,9 +1298,7 @@ class App(FramelessWindow):
         tl = QHBoxLayout(top)
         tl.setContentsMargins(18, 8, 14, 8)
         tl.setSpacing(8)
-        self.brand = QLabel("广告图过滤", top)
-        tl.addWidget(self.brand)
-        tl.addSpacing(8)
+        self.brand = self._titlebar.brand   # 品牌在标题栏正中（TitleBar 内）
         self.btn_add = TransparentPushButton(FIF.FOLDER_ADD, "添加文件夹", top)
         self.btn_add.clicked.connect(self.add_folder)
         tl.addWidget(self.btn_add)
@@ -1081,6 +1387,16 @@ class App(FramelessWindow):
         self.grid.doubleClicked.connect(lambda _idx: self.open_big())          # 双击开大图
         self.grid.selectionModel().selectionChanged.connect(self._on_multi_select)
         self.grid.setContextMenuPolicy(Qt.CustomContextMenu)
+        # 滚动渐隐遮罩（CDS 7 档非线性）：盖在 viewport 上下缘，鼠标事件穿透
+        self._fade_top = ScrollFade("top", self.grid.viewport())
+        self._fade_bottom = ScrollFade("bottom", self.grid.viewport())
+        self._fade_top.raise_()
+        self._fade_bottom.raise_()
+        self._fade_top.hide()
+        self._fade_bottom.hide()
+        sb = self.grid.verticalScrollBar()
+        sb.valueChanged.connect(self._sync_fade_visibility)
+        sb.rangeChanged.connect(lambda *_: self._sync_fade_visibility())
         self.grid.customContextMenuRequested.connect(self._on_context_menu)
         ll.addWidget(self.grid, 1)
         self.grid.viewport().installEventFilter(self)
@@ -1105,11 +1421,13 @@ class App(FramelessWindow):
         dv.addWidget(self.info)
         drow = QHBoxLayout()
         drow.setSpacing(6)
-        self.btn_prev = ToolButton(FIF.LEFT_ARROW, detail)
+        self.btn_prev = ToolButton(detail)
+        self.btn_prev.setText("‹")
         self.btn_prev.setToolTip("上一张（←）")
         self.btn_prev.clicked.connect(lambda: self.step(-1))
         drow.addWidget(self.btn_prev)
-        self.btn_next = ToolButton(FIF.RIGHT_ARROW, detail)
+        self.btn_next = ToolButton(detail)
+        self.btn_next.setText("›")
         self.btn_next.setToolTip("下一张（→）")
         self.btn_next.clicked.connect(lambda: self.step(1))
         drow.addWidget(self.btn_next)
@@ -1309,6 +1627,24 @@ class App(FramelessWindow):
     def _flush_thumb_update(self):
         self._thumb_dirty = False
         self.grid.viewport().update()
+        self._sync_sweep_timer()
+
+    def _sync_fade_visibility(self, *_a):
+        """渐隐遮罩只在该方向还有可滚内容时显示（静止时显示会盖住卡片顶部）。"""
+        sb = self.grid.verticalScrollBar()
+        self._fade_top.setVisible(sb.value() > 0)
+        self._fade_bottom.setVisible(sb.value() < sb.maximum())
+
+    def _sync_sweep_timer(self):
+        """有 pending 缩略图才跑扫光动画。"""
+        try:
+            pending = len(self.thumbs._pending)
+        except Exception:
+            pending = 0
+        if pending > 0 and not self._sweep_timer.isActive():
+            self._sweep_timer.start()
+        elif pending == 0 and self._sweep_timer.isActive():
+            self._sweep_timer.stop()
 
     def _on_current_changed(self, cur, _prev):
         if cur.isValid() and cur.row() < len(self.model.items):
@@ -1328,8 +1664,17 @@ class App(FramelessWindow):
         menu.exec(self.grid.viewport().mapToGlobal(pos))
 
     def select_all(self):
-        for it in list(self.model.items):
-            self.model.checked.add(it["path"])
+        """全选 / 再按一次取消全选（toggle）。"""
+        items = list(self.model.items)
+        if not items:
+            return self
+        if len(self.model.checked) >= len(items):
+            self.model.checked.clear()
+            self._log("已取消全选")
+        else:
+            for it in items:
+                self.model.checked.add(it["path"])
+            self._log(f"已全选 {len(items)} 张")
         self.checked = self.model.checked
         self.grid.viewport().update()
         self._update_count_label()
@@ -1388,9 +1733,11 @@ class App(FramelessWindow):
         MessageBox(title, content, self).exec()
 
     def _toast(self, content, ok=True):
+        # 挂到图片墙区域：TOP 位置的 InfoBar 若挂在主窗口上会遮挡顶栏状态文字
+        host = self.grid.viewport() if hasattr(self, "grid") else self
         (InfoBar.success if ok else InfoBar.warning)(
             title="", content=content, orient=Qt.Horizontal, isClosable=True,
-            position=InfoBarPosition.TOP, duration=2500, parent=self)
+            position=InfoBarPosition.TOP, duration=2500, parent=host)
 
     def build_config(self):
         return ConfigDialog(self, self.cfg)
@@ -1693,11 +2040,32 @@ class App(FramelessWindow):
         del self._pending_rows[:limit]
         fp = self._filter_params()
         add = [it for it in batch if self._passes_filter(it, fp)]
+        # 补来源文件夹（根名/子路径），卡片下方展示
+        roots = [str(Path(r)).rstrip("\\/") for r in self.get_roots()]
+        for it in add:
+            if it.get("_folder"):
+                continue
+            p_str = it["path"]
+            best = ""
+            for r in roots:
+                if p_str == r or p_str.startswith(r + os.sep):
+                    if len(r) > len(best):
+                        best = r
+            if best:
+                rel = p_str[len(best):].lstrip("\\/")
+                parent = str(Path(rel).parent).replace("\\", "/")
+                if parent and parent != ".":
+                    it["_folder"] = f"{Path(best).name}/{parent}"
+                else:
+                    it["_folder"] = Path(best).name
+            else:
+                it["_folder"] = Path(p_str).parent.name
         if add:
             start = len(self.model.items)
             self.model.beginInsertRows(QModelIndex(), start, start + len(add) - 1)
             self.model.items.extend(add)
             self.model.endInsertRows()
+            self.grid.itemDelegate().note_birth([x["path"] for x in add])
             self._update_count_label()
 
     # ---------- 筛选 ----------
@@ -1721,6 +2089,7 @@ class App(FramelessWindow):
 
     def refresh(self):
         self.model.reset_items([it for it in self.items if self._passes_filter(it)])
+        self._sync_fade_visibility()
         self.model.checked = self.checked
         self.grid.viewport().update()
         self._update_count_label()
@@ -1828,7 +2197,10 @@ class App(FramelessWindow):
             self.preview.setText(f"预览失败 {err}")
 
     def resizeEvent(self, e):
-        super().resizeEvent(e)
+        # 渐隐遮罩跟随 viewport 尺寸
+        vp = self.grid.viewport()
+        self._fade_top.setGeometry(0, 0, vp.width(), 28)
+        self._fade_bottom.setGeometry(0, vp.height() - 28, vp.width(), 28)
         if getattr(self, "_preview_path", None):
             self._resize_timer.start()
 
@@ -2365,6 +2737,9 @@ def gui_func_test() -> int:
 
         app.select_all()
         check("全选", len(app.model.checked) == len(app.model.items))
+        app.select_all()
+        check("全选再按=取消全选", len(app.model.checked) == 0)
+        app.select_all()
         app.invert_sel()
         check("反选", len(app.model.checked) == 0, f"checked={len(app.model.checked)}")
         app.invert_sel()
