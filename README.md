@@ -25,7 +25,7 @@
 ## 安装
 
 ```bash
-git clone https://github.com/<your-name>/ad-filter-gui.git
+git clone https://github.com/ElmaTony/Ad-Image-Filter-GUI.git
 cd ad-filter-gui
 pip install -r requirements.txt
 ```
