@@ -1364,6 +1364,7 @@ class App(FramelessWindow):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 48, 0, 0)
         root.setSpacing(0)
+        self._root_layout = root   # 布局管理器需要它做「底部条 停靠↔悬浮」切换
 
         # 顶部工具栏
         top = QWidget(self)
@@ -1417,6 +1418,7 @@ class App(FramelessWindow):
 
         # 中部：图片墙 + 详情
         mid = QHBoxLayout()
+        self.mid = mid
         mid.setContentsMargins(0, 0, 0, 0)
         mid.setSpacing(0)
 
@@ -1493,6 +1495,7 @@ class App(FramelessWindow):
 
         detail = QWidget(self)
         detail.setObjectName("detailPanel")
+        self.detail = detail
         detail.setFixedWidth(360)
         dv = QVBoxLayout(detail)
         dv.setContentsMargins(14, 14, 14, 12)
@@ -1572,6 +1575,8 @@ class App(FramelessWindow):
         self.btn_dispose.clicked.connect(self.execute_disposal)
         bl.addWidget(self.btn_dispose)
         root.addWidget(bot)
+        self.bot = bot              # 布局管理器：D3 模式把它变悬浮胶囊
+        self._bot_css = bot.styleSheet()
 
         # 操作日志（默认折叠，点"操作日志"展开）
         self.log = TextEdit(self)
@@ -1579,6 +1584,28 @@ class App(FramelessWindow):
         self.log.setFixedHeight(0)
         self.log.setVisible(False)
         root.addWidget(self.log)
+
+        # —— 三种骨架：共用同一批控件，只重排（切换时状态零丢失）——
+        from cds_layouts import LayoutManager
+        self.lm = LayoutManager(self)
+        self.layout_mode = self.cfg.get("ui_layout", "studio")
+        self.lm.apply(self.layout_mode)
+
+        # —— 空状态（claudecodeui 规范）：无结果时覆盖在图片墙上，鼠标穿透 ——
+        from cds_widgets import CDSEmptyState
+        host = self.grid.parent() if self.grid.parent() else self
+        self._empty = CDSEmptyState(
+            "◍", "还没有扫描结果",
+            "把相册文件夹拖进窗口，或点「添加文件夹」→「开始扫描」。\n按 Ctrl+K 可打开命令面板。",
+            host)
+        self._empty.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._empty.setGeometry(self.grid.geometry())
+        self._empty.hide()
+        # 搜索框带 ⌘K 提示（快捷键可发现性）
+        try:
+            self.f_search.setPlaceholderText("路径过滤…  Ctrl+K 命令面板")
+        except Exception:
+            pass
 
         self._apply_styles()
 
@@ -1657,6 +1684,10 @@ class App(FramelessWindow):
                 return True
             elif k == Qt.Key_Delete:
                 self.execute_disposal()
+                return True
+            elif k in (Qt.Key_1, Qt.Key_2, Qt.Key_3) and (ev.modifiers() & Qt.ControlModifier):
+                self.set_layout({Qt.Key_1: "studio", Qt.Key_2: "workbench",
+                                 Qt.Key_3: "gallery"}[k])
                 return True
             return False
         if g is not None and obj is g.viewport():
@@ -1832,11 +1863,41 @@ class App(FramelessWindow):
         MessageBox(title, content, self).exec()
 
     def _toast(self, content, ok=True):
-        # 挂到图片墙区域：TOP 位置的 InfoBar 若挂在主窗口上会遮挡顶栏状态文字
-        host = self.grid.viewport() if hasattr(self, "grid") else self
-        (InfoBar.success if ok else InfoBar.warning)(
-            title="", content=content, orient=Qt.Horizontal, isClosable=True,
-            position=InfoBarPosition.TOP, duration=2500, parent=host)
+        """CDS Toast：右下角 3000ms 自消失（claudecodeui 规范）。
+
+        用自绘 Toast 而非 InfoBar——InfoBar 是模态化的浮层，在自动化测试的事件泵里
+        会挂住流程（历史坑），且位置固定顶部会遮挡状态文字。
+        """
+        try:
+            from cds_widgets import CDSToast
+            CDSToast.show(self, content, "ok" if ok else "warn")
+        except Exception:
+            pass
+
+    def open_palette(self):
+        """⌘K 命令面板（claudecodeui 范式）：所有操作一个入口。"""
+        cmds = [
+            ("开始扫描", self.start_scan),
+            ("暂停 / 继续扫描", self.toggle_pause),
+            ("取消扫描", self.cancel_scan),
+            ("全选 / 取消全选", self.select_all),
+            ("反选", self.invert_sel),
+            ("清除选择", self.clear_sel),
+            ("选相似组", self.select_similar_groups),
+            ("执行处置", self.execute_disposal),
+            ("撤销上次隔离处置", self.undo_disposal),
+            ("规则管理…", lambda: self.build_rule_editor().exec()),
+            ("扫描历史…", self.open_history),
+            ("隔离区管理…", self.restore_ui),
+            ("导出 CSV 报告", self.export_report),
+            ("切换浅色 / 深色", self.toggle_theme),
+            ("布局 D1 Studio（Ctrl+1）", lambda: self.set_layout("studio")),
+            ("布局 D2 工作台（Ctrl+2）", lambda: self.set_layout("workbench")),
+            ("布局 D3 画廊（Ctrl+3）", lambda: self.set_layout("gallery")),
+        ]
+        from cds_widgets import CDSCommandPalette
+        self._palette = CDSCommandPalette.popup(self, cmds)
+        return self
 
     def build_config(self):
         return ConfigDialog(self, self.cfg)
@@ -2243,6 +2304,12 @@ class App(FramelessWindow):
         self.model.checked = self.checked
         self.grid.viewport().update()
         self._update_count_label()
+        # 空状态：仅在「无结果且没在扫描」时出现
+        e = getattr(self, "_empty", None)
+        if e is not None:
+            scanning = bool(self.scan_thread and self.scan_thread.is_alive())
+            e.setVisible(len(self.model.items) == 0 and not scanning)
+            e.setGeometry(self.grid.geometry())
 
     def _reload_reason_filter(self):
         labels = set()
@@ -2350,6 +2417,29 @@ class App(FramelessWindow):
         super().showEvent(e)
         self._sync_titlebar()   # 首次显示时窗口尺寸才最终确定
 
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_K and (e.modifiers() & Qt.ControlModifier):
+            self.open_palette()
+            return
+        super().keyPressEvent(e)
+
+    def set_layout(self, mode: str):
+        """切换骨架：studio(D1) / workbench(D2) / gallery(D3)。"""
+        if not hasattr(self, "lm"):
+            return self
+        self.layout_mode = mode
+        self.cfg["ui_layout"] = mode
+        try:
+            af.save_config(self.cfg)
+        except Exception:
+            pass
+        self.lm.apply(mode)
+        self._apply_styles()
+        label = self.lm.LABELS.get(mode, mode)
+        self._log(f"切换布局：{label}")
+        self._toast(f"布局：{label}（Ctrl+1/2/3 切换）")
+        return self
+
     def _sync_titlebar(self):
         """标题栏宽度必须始终等于窗口宽度。
 
@@ -2366,6 +2456,10 @@ class App(FramelessWindow):
     def resizeEvent(self, e):
         super().resizeEvent(e)          # 基类靠它拉宽标题栏，不能漏
         self._sync_titlebar()           # 双保险：不依赖基类实现
+        if hasattr(self, "lm"):
+            self.lm.on_resize()         # D3 悬浮胶囊需跟随重定位
+        if getattr(self, "_empty", None) is not None:
+            self._empty.setGeometry(self.grid.geometry())
         # 渐隐遮罩跟随 viewport 尺寸
         vp = self.grid.viewport()
         self._fade_top.setGeometry(0, 0, vp.width(), 28)
@@ -3749,6 +3843,55 @@ def gui_func_test() -> int:
               f"tb={tb.width()} win={app.width()} right={cr2}")
         app.resize(w0, h0)
         pump(0.3)
+
+        # —— 三种骨架：侧栏宽度 / 详情显隐 / 底部停靠↔悬浮 / 切换状态保留 ——
+        app._toast = lambda *a, **k: None   # 切换会弹 toast，静默之
+        for m, want_sb in (("studio", 256), ("workbench", 288), ("gallery", 0)):
+            app.set_layout(m)
+            pump(0.3)
+            sb = app.lm.sidebar
+            ok = (sb is not None and sb.width() == want_sb) if want_sb else sb is None
+            check(f"布局 {m} 侧栏", ok, f"sidebar={sb.width() if sb else None}")
+        check("gallery 底部悬浮胶囊", app.lm._float_bar is not None)
+        app.set_layout("workbench")
+        pump(0.3)
+        check("workbench 详情常驻", app.detail.isVisible())
+        check("workbench 底部停靠", app.lm._float_bar is None)
+        app.set_layout("studio")
+        pump(0.3)
+        check("studio 详情隐藏", not app.detail.isVisible())
+        # 切换不丢勾选
+        app.model.checked = {"__t1__", "__t2__"}
+        app.checked = app.model.checked
+        n_sel = len(app.model.checked)
+        for _ in range(3):
+            app.set_layout("gallery"); pump(0.15); app.set_layout("studio"); pump(0.15)
+        check("切换布局勾选保留", len(app.model.checked) == n_sel,
+              f"{n_sel}->{len(app.model.checked)}")
+
+        # —— 命令面板（⌘K）——
+        app.open_palette()
+        pump(0.25)
+        check("命令面板打开", app._palette is not None and app._palette.list.count() >= 15,
+              f"n={app._palette.list.count() if app._palette else 0}")
+        if app._palette is not None:
+            # 过滤缩小范围 + 回车执行布局切换
+            app._palette.edit.setText("画廊")
+            pump(0.15)
+            check("命令面板过滤", 0 < app._palette.list.count() < 17,
+                  f"n={app._palette.list.count()}")
+            app._palette._run_current()
+            pump(0.3)
+            check("命令面板执行生效", app.layout_mode == "gallery", app.layout_mode)
+            app.set_layout("studio")
+            pump(0.3)
+
+        # —— 空状态 ——
+        app.items = []
+        app.model.reset_items([])
+        app.refresh()
+        pump(0.3)
+        check("无结果时空状态显示", app._empty.isVisible())
 
     finally:
         app.close()
