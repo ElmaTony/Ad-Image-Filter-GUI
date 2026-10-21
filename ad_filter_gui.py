@@ -503,17 +503,16 @@ class TitleBar(QWidget):
         self.setObjectName("titleBar")
         self.setFixedHeight(38)
         self.setAttribute(Qt.WA_StyledBackground, True)
-        # 右侧按钮（46x32，Windows 顺序：最小化 / 最大化 / 关闭）
+        # 右侧按钮：Windows 顺序 最小化/最大化/关闭，46x30 成组紧贴右边缘
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(16, 0, 0, 0)   # 左对齐：Windows 习惯（图标+标题在左，按钮在右）
-        lay.setSpacing(9)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        # 品牌不走布局：布局只能左对齐，"居中"必须按窗口真实宽度算（见 _place_brand）
         self.logo = QLabel(self)
         self.logo.setObjectName("titleLogo")
         self.logo.setFixedSize(15, 15)
-        lay.addWidget(self.logo)
         self.brand = QLabel("", self)
         self.brand.setObjectName("titleBrand")
-        lay.addWidget(self.brand)
         lay.addStretch(1)
         self.btn_min = self._mk_btn("—", "最小化")
         self.btn_min.clicked.connect(win.showMinimized)
@@ -528,11 +527,28 @@ class TitleBar(QWidget):
         from PySide6.QtWidgets import QPushButton
         b = QPushButton(text, self)
         b.setObjectName("titleBtn")
-        b.setFixedSize(42, 26)
+        b.setFixedSize(46, 30)
         b.setToolTip(tip)
         b.setCursor(Qt.ArrowCursor)
         b.setFocusPolicy(Qt.NoFocus)
         return b
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._place_brand()
+
+    def _place_brand(self):
+        """品牌按窗口真实宽度绝对居中（布局的左对齐做不到真正居中）。"""
+        if not hasattr(self, "brand"):
+            return
+        self.brand.adjustSize()
+        lw, bw = self.logo.width(), self.brand.width()
+        gap = 6
+        # 品牌文字严格居中，logo 挂在其左侧（整体居中会让文字被 logo 挤偏右）
+        bx = max(12 + lw + gap, (self.width() - bw) // 2)
+        ly = (38 - self.logo.height()) // 2
+        self.brand.setGeometry(bx, (38 - self.brand.height()) // 2, bw, self.brand.height())
+        self.logo.setGeometry(bx - lw - gap, ly, lw, self.logo.height())
 
     def _toggle_max(self):
         if self._win.isMaximized():
@@ -559,6 +575,7 @@ class TitleBar(QWidget):
             f"font-size: 13px; font-weight: 600; letter-spacing: 0.3px; color: {base};"
             "background: transparent;")
         self.brand.setText(f'<span style="color:{clay};">广告</span>图过滤')
+        self._place_brand()
         # 陶土色品牌小方块（应用标识）
         self.logo.setStyleSheet(
             f"background: {clay}; border-radius: 4px; color: #ffffff;"
@@ -2329,7 +2346,26 @@ class App(FramelessWindow):
             self._pix = None
             self.preview.setText(f"预览失败 {err}")
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._sync_titlebar()   # 首次显示时窗口尺寸才最终确定
+
+    def _sync_titlebar(self):
+        """标题栏宽度必须始终等于窗口宽度。
+
+        qframelesswindow 只在基类 resizeEvent 里做这件事；本类重载了 resizeEvent，
+        若不显式同步，标题栏会停在初始默认宽度（640），右侧三个按钮就会悬在
+        窗口中间——窗口越宽/最大化偏差越大。
+        """
+        tb = getattr(self, "_titlebar", None)
+        if tb is None:
+            return
+        tb.setGeometry(0, 0, self.width(), tb.height())
+        tb.raise_()
+
     def resizeEvent(self, e):
+        super().resizeEvent(e)          # 基类靠它拉宽标题栏，不能漏
+        self._sync_titlebar()           # 双保险：不依赖基类实现
         # 渐隐遮罩跟随 viewport 尺寸
         vp = self.grid.viewport()
         self._fade_top.setGeometry(0, 0, vp.width(), 28)
@@ -3691,6 +3727,28 @@ def gui_func_test() -> int:
         app.cfg.clear()
         app.cfg.update(cfg_backup)
         dlg4.close()
+
+        # —— 标题栏几何：三按钮必须贴右边缘，且随窗口宽度同步 ——
+        tb = app._titlebar
+        check("标题栏宽度=窗口宽度", tb.width() == app.width(),
+              f"tb={tb.width()} win={app.width()}")
+        cr = tb.btn_close.geometry().right()
+        check("关闭按钮贴右边缘", abs(cr - (app.width() - 1)) <= 2, f"right={cr} win={app.width()}")
+        check("按钮顺序 最小<最大<关闭",
+              tb.btn_min.geometry().x() < tb.btn_max.geometry().x() < tb.btn_close.geometry().x(),
+              f"{tb.btn_min.geometry().x()}/{tb.btn_max.geometry().x()}/{tb.btn_close.geometry().x()}")
+        bg = tb.brand.geometry()
+        bc = bg.x() + bg.width() // 2
+        check("品牌标题居中(偏差≤3)", abs(bc - app.width() // 2) <= 3,
+              f"brand_center={bc} win_center={app.width() // 2}")
+        w0, h0 = app.width(), app.height()
+        app.resize(1200, 800)
+        pump(0.4)
+        cr2 = tb.btn_close.geometry().right()
+        check("缩放后标题栏同步", tb.width() == app.width() and abs(cr2 - (app.width() - 1)) <= 2,
+              f"tb={tb.width()} win={app.width()} right={cr2}")
+        app.resize(w0, h0)
+        pump(0.3)
 
     finally:
         app.close()
