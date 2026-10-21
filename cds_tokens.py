@@ -139,10 +139,13 @@ def sem(dark: bool, role):
     return c(dark, _ROLE_FG[key]), c(dark, T.fill[key]), c(dark, T.edge[key])
 
 
-def pill_qss(dark: bool, role: str, radius: int = 999, pad: str = "3px 8px") -> str:
-    """语义色药丸（徽标/状态条），返回可直接拼进 setStyleSheet 的片段。"""
+def pill_qss(dark: bool, role: str, radius: int = 13, pad: str = "3px 10px",
+             border: bool = False) -> str:
+    """语义色药丸。**radius 用具体像素**——Qt QSS 的 999px 会渲染成直角（实测），
+    别再写 R_FULL 当圆角。默认无边框（Claude 风格：淡底 + 语义色字即可）。"""
     fg, fill, edge = sem(dark, role)
-    return (f"background: {fill}; border: 1px solid {edge}; "
+    b = f" border: 1px solid {edge};" if border else ""
+    return (f"background: {fill};{b} "
             f"border-radius: {radius}px; padding: {pad}; color: {fg};")
 
 
@@ -156,7 +159,8 @@ R_CARD = 12   # 卡片
 R_XL   = 16   # 模态框 / 大容器
 R_2XL  = 24
 R_COMPOSER = 20   # Composer 外壳（Claude 桌面标志）
-R_FULL = 999      # pill / 分段 / 滚动条
+R_FULL = 999      # 分段 / 滚动条（**QSS 圆角禁用此值**——999px 在 Qt 里渲染成直角，pill 用 R_PILL）
+R_PILL = 13       # 药丸圆角（约 26px 高度的一半，实测 Qt 正确渲染）
 R_CONCENTRIC = 12  # 同心公式：容器 12 时子元素 4（差值里的最小值）
 
 # ============================================================ 高度（A：scale）

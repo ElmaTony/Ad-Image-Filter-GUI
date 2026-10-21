@@ -10,6 +10,7 @@
   gallery   D3：全宽图片墙（侧栏收进抽屉）+ 悬浮操作胶囊（Composer 20px 双环）
 """
 from PySide6.QtCore import Qt, QEvent, Signal
+from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout,
                                QWidget)
 
@@ -17,6 +18,20 @@ import cds_tokens as T
 from cds_tokens import T as TT          # 类属性（surface / text / border …）
 from cds_widgets import CDSIconButton, _font
 from qfluentwidgets import FluentIcon as FIF
+
+
+def tint_icon(base, color: QColor, size: int = 16):
+    """字体图标染色。qfluentwidgets 的 icon(color) 只对 SVG 生效——FIF 全是字体
+    图标，color 会被静默忽略画成黑（深色侧栏上 = 隐形）。手动 SourceIn 填色。"""
+    pm = base.icon().pixmap(size, size)
+    out = QPixmap(size, size)
+    out.fill(Qt.transparent)
+    p = QPainter(out)
+    p.drawPixmap(0, 0, pm)
+    p.setCompositionMode(QPainter.CompositionMode_SourceIn)
+    p.fillRect(0, 0, size, size, color)
+    p.end()
+    return out
 
 # 导航图标全部用 FluentIcon（Segoe Fluent Icons 字体，Windows 一定存在）；
 # 别再自造 ◍▦⛒ 这类 Unicode 字形——在部分字体里是方块，看着不像成品。
@@ -55,6 +70,8 @@ class CDSNavItem(QFrame):
         lay.addStretch(1)
         self.badge = QLabel("", self)
         self.badge.setFont(_font(10, bold=True))
+        self.badge.setFixedHeight(18)          # 否则被布局拉伸成全行高的橙块
+        self.badge.hide()                       # 空文本 + padding 会撑出橙色小块，必须先藏
         lay.addWidget(self.badge)
         self.dark = True
         self.refresh_theme(True)
@@ -78,12 +95,11 @@ class CDSNavItem(QFrame):
         else:
             bg, fg = "transparent", T.c(dark, TT.text_2)
         self.setStyleSheet(f"CDSNavItem {{ background: {bg}; border-radius: {T.R_LG}px; }}")
-        from PySide6.QtGui import QColor
-        self.ico.setPixmap(self._icon.icon(QColor(fg)).pixmap(16, 16))
+        self.ico.setPixmap(tint_icon(self._icon, QColor(fg), 16))
         self.txt.setStyleSheet(
             f"color: {fg}; background: transparent; font-weight: {'600' if self._sel else '400'};")
         self.badge.setStyleSheet(
-            f"color: {T.CLAY}; background: {T.c(dark, TT.clay_badge)};"
+            f"color: #fff; background: {T.CLAY};"
             f" border-radius: {T.R_MD}px; padding: 1px 6px;")
 
 
@@ -298,7 +314,18 @@ class LayoutManager:
         bot = self._float_bar
         if bot is None:
             return
-        w = min(560, app.width() - 80)
+        # 宽度按内容 sizeHint 自适应（硬编码 560 曾把按钮挤到重叠裁切），
+        # 放不下时等比收紧内边距与间距，内容永不裁切
+        bot.setFixedWidth(16777215)          # 先解锁再量
+        hint = bot.sizeHint().width()
+        avail = app.width() - 48
+        w = max(360, min(hint, avail))
+        if w < hint:
+            bl = bot.layout()
+            bl.setSpacing(max(2, bl.spacing() - 4))
+            m = bl.contentsMargins()
+            bl.setContentsMargins(max(6, m.left() - 4), m.top(),
+                                  max(6, m.right() - 4), m.bottom())
         bot.setFixedWidth(w)
         bot.move((app.width() - w) // 2, app.height() - 72)
 

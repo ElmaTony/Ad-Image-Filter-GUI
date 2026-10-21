@@ -289,7 +289,8 @@ class CardDelegate(QStyledItemDelegate):
             g.setColorAt(0.65, QColor(0, 0, 0, 0))
             g.setColorAt(1.0, QColor(0, 0, 0, 0))
             p.fillRect(img_r, QBrush(g))
-        # 判定徽章（贴在缩略图左下）：语义色药丸（红=广告 / 琥珀=疑似 / 蓝=异常）
+        # 判定徽章（贴在缩略图左下）：语义色小徽标——淡底无边框，降饱和降噪
+        # （整屏 9 张卡片若每张都红边红字会视觉过载，语义色只留这一枚小徽章）
         vrole = CDST.ROLE_BY_VERDICT.get(it["verdict"], "info")
         vc, vfill, vedge = CDST.sem(dark, vrole)
         vc = QColor(vc)
@@ -300,9 +301,6 @@ class CardDelegate(QStyledItemDelegate):
         br = QRect(img_r.left() + 8, img_r.bottom() - 26, min(bw, img_r.width() - 16), 18)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(vfill))
-        p.drawRoundedRect(br, CDST.R_SM, CDST.R_SM)
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(vedge), 1))
         p.drawRoundedRect(br, CDST.R_SM, CDST.R_SM)
         p.setPen(vc)
         p.setFont(self._f_badge)
@@ -322,12 +320,13 @@ class CardDelegate(QStyledItemDelegate):
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(CDST.c(dark, CDSTT.muted)))
             p.drawRoundedRect(br, CDST.R_SM, CDST.R_SM)
-            p.setPen(QColor(CDST.c(dark, CDSTT.text_2)))
+            p.setPen(QColor(CDST.c(dark, CDSTT.text_3)))
             p.setFont(self._f_badge)
             p.drawText(br, Qt.AlignCenter, btxt)
+        # 命中原因：中性灰（不再整屏红字；语义色只保留在判定徽章上）
         reason = self._fm_reason.elidedText("; ".join(h.get("label", "") for h in it["reasons"]),
                                             Qt.ElideRight, r.width() - 20)
-        p.setPen(_verdict_color(it["verdict"]))
+        p.setPen(QColor(CDST.c(dark, CDSTT.text_2)))
         p.setFont(self._f_reason)
         p.drawText(QRect(r.left() + 10, r.bottom() - 32, r.width() - 20, 13),
                    Qt.AlignLeft | Qt.AlignVCenter, reason)
@@ -518,9 +517,13 @@ class FolderBar(QWidget):
                          and self.app.scan_thread is not None
                          and self.app.scan_thread.is_alive())
             chip.set_state(text, is_done, is_active)
-        # 总进度（扫描中）
+        # 总进度（扫描中才显示，完成后整组隐藏——100% 常驻是视觉噪音）
         total_all = self.app.total_files
-        if total_all > 0 and any_total:
+        scanning = self.app.scan_thread is not None and self.app.scan_thread.is_alive()
+        show_prog = bool(scanning and total_all > 0 and any_total)
+        self.progress.setVisible(show_prog)
+        self.lbl_pct.setVisible(show_prog)
+        if show_prog:
             d_all = sum(done.get(k, 0) for k in totals)
             # 未归属根的也在跑：用引擎广播的进度更准（见 _poll_queue）
             self.progress.setValue(int(getattr(self.app, "_last_progress", 0) * 100 / max(1, total_all)))
@@ -1302,27 +1305,28 @@ class App(FramelessWindow):
 
         self.setStyleSheet(f"""
             #mainWindow {{ background: {root_bg}; }}
-            /* 顶/底栏：surface0 + 发丝（单一闭合描边，不做双向边） */
-            #topBar {{ background: {s0}; border-bottom: 1px solid {bdr}; }}
-            #bottomBar {{ background: {s0}; border-top: 1px solid {bdr}; }}
-            #filterBar {{ background: {s1}; border-bottom: 1px solid {bdr_soft}; }}
-            #detailPanel {{ background: {s1}; border-left: 1px solid {bdr}; }}
+            /* 整窗统一底色（Claude 原则：靠留白与发丝分层，不做盒子套盒子）。
+               顶/底/筛选/文件夹条全部透出根底色，只留一条极淡发丝。 */
+            #topBar {{ background: transparent; border-bottom: 1px solid {bdr_soft}; }}
+            #bottomBar {{ background: transparent; border-top: 1px solid {bdr_soft}; }}
+            #filterBar {{ background: transparent; border: none; }}
+            #detailPanel {{ background: transparent; border-left: 1px solid {bdr_soft}; }}
             #detailHead {{ background: transparent; border-bottom: 1px solid {bdr_soft}; }}
             #gridWrap {{ background: transparent; }}
-            #folderBar {{ background: {s0}; border-bottom: 1px solid {bdr_soft}; }}
-            /* 预览画布：surface2 + 发丝，圆角 12 */
+            #folderBar {{ background: transparent; border-bottom: 1px solid {bdr_soft}; }}
+            /* 预览画布：图片需要边界，保留 surface2 + 发丝 + 圆角 12 */
             #previewCanvas {{ background: {s2}; border: 1px solid {bdr};
                 border-radius: {CDST.R_CARD}px; color: {txt3}; }}
-            #vsep {{ background: {bdr}; }}
-            /* 文件夹 chip：中性；完成=绿；当前=品牌橙 */
-            #folderChip {{ background: {s2}; border: 1px solid {bdr}; border-radius: {CDST.R_MD}px; }}
+            #vsep {{ background: {bdr_soft}; }}
+            /* 文件夹 chip：淡底无边框（hover 才浮出），完成=绿字 */
+            #folderChip {{ background: {hov}; border: 1px solid transparent; border-radius: {CDST.R_MD}px; }}
             #folderChip QLabel {{ background: transparent; color: {txt2}; font-size: 12px; }}
             #folderChip QToolButton {{
                 border: none; background: transparent; color: {txt3};
                 font-size: 11px; border-radius: {CDST.R_LG}px;
             }}
             #folderChip QToolButton:hover {{ color: {clay}; background: {clay_fill}; }}
-            #folderChip[done="true"] {{ background: {ok_fill}; border-color: {ok_edge}; }}
+            #folderChip[done="true"] {{ background: {ok_fill}; border-color: transparent; }}
             #folderChip[done="true"] QLabel {{ color: {ok_fg}; }}
             #folderChip[active="true"] {{ border-color: {clay_edge}; background: {clay_fill}; }}
             #folderChip[active="true"] QLabel {{ color: {clay}; }}
@@ -1406,8 +1410,9 @@ class App(FramelessWindow):
         d = isDarkTheme()
         role = getattr(self, "_status_role", "gray")
         fg, fill, edge = CDST.sem(d, role)
+        # 淡底无边框胶囊（Claude 风格）；13px 圆角——999px 在 Qt QSS 里是直角
         self.status_pill.setStyleSheet(
-            f"#statusPill {{ background: {fill}; border: 1px solid {edge}; border-radius: {CDST.R_FULL}px; }}")
+            f"#statusPill {{ background: {fill}; border-radius: {CDST.R_PILL}px; }}")
         self.status.setStyleSheet(f"color: {fg}; background: transparent;")
         self.dot.set_state(self._DOT_BY_ROLE.get(role, "ready"))
 
@@ -1659,7 +1664,7 @@ class App(FramelessWindow):
         dbl = QVBoxLayout(dbody)
         dbl.setContentsMargins(16, 12, 16, 12)
         dbl.setSpacing(10)
-        self.preview = QLabel("", dbody)
+        self.preview = QLabel("选中图片查看预览", dbody)
         self.preview.setObjectName("previewCanvas")
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumHeight(180)
@@ -2554,10 +2559,9 @@ class App(FramelessWindow):
         self.f_reason.blockSignals(False)
 
     def _update_count_label(self):
-        """计数药丸：命中=中性灰，已选=品牌橙（0 时降为灰），形成主次层级。"""
+        """计数药丸：命中常驻（灰），已选只在 >0 时出现（品牌橙）——0 时不占视觉。"""
         n_hit, n_sel = len(self.model.items), len(self.checked)
         d = isDarkTheme()
-        gray_fg, gray_fill, gray_edge = CDST.sem(d, "gray")
         self.pill_hit.setText(f"命中 {n_hit}")
         self.pill_hit.setStyleSheet(
             f"#countPill {{ {CDST.pill_qss(d, 'gray')} }}")
@@ -2565,6 +2569,7 @@ class App(FramelessWindow):
         role = "clay" if n_sel else "gray"
         self.pill_sel.setStyleSheet(
             f"#countPill {{ {CDST.pill_qss(d, role)} }}")
+        self.pill_sel.setVisible(n_sel > 0)
         self.lbl_count.setToolTip(f"命中 {n_hit} · 已选 {n_sel}")
 
     def _paint_detail_badge(self, it):
