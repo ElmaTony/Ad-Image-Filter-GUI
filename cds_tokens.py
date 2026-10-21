@@ -61,9 +61,18 @@ class T:
     text_on_clay = _t("#FFFFFF", "#FFFFFF")
 
     # —— 边框 / 分隔线 ——
-    border      = _t("#E5E1DA", "#2E2C2A")   # 1px（B：HSL 44 14% 87% / 暗 暖化）
-    border_soft = _t("#EFEDE8", "#262524")   # 更弱的分隔
+    border       = _t("#E5E1DA", "#2E2C2A")  # alpha2：1px 基础边框
+    border_strong = _t("rgba(0,0,0,0.20)", "rgba(255,255,255,0.18)")  # alpha3：hover / 激活
+    border_soft  = _t("#EFEDE8", "#262524")  # alpha1：更弱的分隔
+    # 灰阶层级（10 级暖灰，供文字/底/边框取用；避免"只有一个橙"）
+    gray = {"10": _t("#FCFCFB", "#151515"), "20": _t("#F5F5F3", "#0B0B0B"),
+            "100": _t("#DEDCD6", "#2E2C2A"), "300": _t("#A4A19B", "#6E6B66"),
+            "500": _t("#6B6863", "#A8A29A"), "700": _t("#373634", "#E8E6E0"),
+            "850": _t("#151515", "#FCFCFB"), "900": _t("#0B0B0A", "#FFFFFF")}
     border_clay = _t("rgba(217,119,87,0.40)", "rgba(217,119,87,0.45)")
+
+    # —— 品牌（动作 / 选中 / 品牌标记专用；判定色不得复用它）——
+    clay        = _t("#C6613F", "#E08264")
 
     # —— 填充 ——
     muted       = _t("#F1EFEA", "#232221")   # muted / accent 底
@@ -81,11 +90,30 @@ class T:
     danger  = _t("#DC2626", "#F87171")   # red
     info    = _t("#2563EB", "#60A5FA")   # blue
 
-    # —— 判定色（本项目语义：广告用 clay 系，疑似用 amber，异常用 red）——
-    verdict_ad      = _t("#C6613F", "#E08264")
-    verdict_suspect = _t("#B87A2E", "#D9A45B")
-    verdict_error   = _t("#C0392B", "#E06C5A")
-    verdict_clean   = _t("#6B6863", "#8A857E")
+    # —— 判定色（六角色体系：橙=品牌动作 / 红=广告 / 琥珀=疑似 / 蓝=异常 / 绿=干净）——
+    # 关键：判定色必须与品牌橙拉开色相，否则整屏"只有一个颜色"
+    verdict_ad      = _t("#C0392B", "#F0715F")   # 红（去重：不复用 clay）
+    verdict_suspect = _t("#B87A2E", "#E0A85C")   # 琥珀
+    verdict_error   = _t("#3B6FD4", "#7FA6F0")   # 蓝（程序异常，非内容判定）
+    verdict_clean   = _t("#2F9E63", "#4CC38A")   # 绿
+
+    # —— 语义填充 / 边框（徽标药丸、状态条用）——
+    fill = {
+        "ok":     _t("rgba(47,158,99,0.12)",   "rgba(76,195,138,0.14)"),
+        "warn":   _t("rgba(217,138,43,0.13)",  "rgba(240,180,95,0.15)"),
+        "danger": _t("rgba(192,57,43,0.12)",   "rgba(240,113,95,0.15)"),
+        "info":   _t("rgba(59,111,212,0.12)",  "rgba(127,166,240,0.15)"),
+        "clay":   _t("rgba(217,119,87,0.10)",  "rgba(217,119,87,0.14)"),
+        "gray":   _t("rgba(107,104,99,0.10)",  "rgba(168,162,154,0.13)"),
+    }
+    edge = {
+        "ok":     _t("rgba(47,158,99,0.34)",   "rgba(76,195,138,0.38)"),
+        "warn":   _t("rgba(184,122,46,0.36)",  "rgba(224,168,92,0.40)"),
+        "danger": _t("rgba(192,57,43,0.34)",   "rgba(240,113,95,0.38)"),
+        "info":   _t("rgba(59,111,212,0.34)",  "rgba(127,166,240,0.38)"),
+        "clay":   _t("rgba(217,119,87,0.42)",  "rgba(217,119,87,0.45)"),
+        "gray":   _t("rgba(107,104,99,0.26)",  "rgba(168,162,154,0.28)"),
+    }
 
     # —— 遮罩（子控件 alpha 保留的场合）——
     scrim          = _t("rgba(20,18,16,0.42)", "rgba(0,0,0,0.58)")
@@ -95,6 +123,27 @@ class T:
 def c(dark: bool, token: dict) -> str:
     """取当前主题下的色值。"""
     return token["dark" if dark else "light"]
+
+
+# —— 语义角色 ——
+ROLE_BY_VERDICT = {"ad": "danger", "suspect": "warn", "error": "info", "clean": "ok"}
+_ROLE_FG = {"ok": T.ok, "warn": T.warn, "danger": T.danger,
+            "info": T.info, "clay": T.clay, "gray": T.text_2}
+
+
+def sem(dark: bool, role):
+    """语义角色三件套：(主色, 填充, 边框)。role ∈ ok/warn/danger/info/clay/gray 或 ad/suspect/error/clean"""
+    key = ROLE_BY_VERDICT.get(role, role)
+    if key not in _ROLE_FG:
+        key = "gray"
+    return c(dark, _ROLE_FG[key]), c(dark, T.fill[key]), c(dark, T.edge[key])
+
+
+def pill_qss(dark: bool, role: str, radius: int = 999, pad: str = "3px 8px") -> str:
+    """语义色药丸（徽标/状态条），返回可直接拼进 setStyleSheet 的片段。"""
+    fg, fill, edge = sem(dark, role)
+    return (f"background: {fill}; border: 1px solid {edge}; "
+            f"border-radius: {radius}px; padding: {pad}; color: {fg};")
 
 
 # ============================================================ 圆角（C：tokens.json 原文）

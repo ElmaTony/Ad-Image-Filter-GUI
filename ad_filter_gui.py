@@ -15,13 +15,16 @@ from collections import OrderedDict
 from pathlib import Path
 
 import ad_filter as af
+import cds_tokens as CDST
+from cds_tokens import T as CDSTT       # 主题类属性（surface / text / border / 判定色 …）
 
 from PySide6.QtCore import (QAbstractListModel, Property, QEvent, QModelIndex, QObject, QRect, QSize,
                             Qt, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QImage,
                           QLinearGradient, QPainter,
                            QPen, QPixmap)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFrame,
+                               QHBoxLayout,
                                QLabel, QListView, QListWidgetItem, QMenu, QPushButton,
                                QGraphicsOpacityEffect, QStackedWidget,
                                QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget)
@@ -43,9 +46,9 @@ def _c(dark_hex, light_hex):
 
 
 def _verdict_color(verdict: str) -> QColor:
-    if isDarkTheme():
-        return QColor({"ad": "#e08264", "suspect": "#e6b445", "error": "#c99ad4"}.get(verdict, "#a3a098"))
-    return QColor({"ad": "#c6613f", "suspect": "#9a6a12", "error": "#8f4a99"}.get(verdict, "#6f6d66"))
+    """判定色 = 语义色（红/琥珀/蓝/绿），与品牌橙彻底分开。"""
+    fg, _fill, _edge = CDST.sem(isDarkTheme(), verdict)
+    return QColor(fg)
 
 
 # ================================================================ 缩略图缓存
@@ -173,9 +176,14 @@ class CardDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self.thumbs = thumbs
         self.model = model
-        self._f_name = QFont("Microsoft YaHei UI", 8)
-        self._f_reason = QFont("Microsoft YaHei UI", 7)
-        self._f_badge = QFont("Consolas", 7)
+        # CDS 排版：正文 13px / 次级 11px / 等宽数字 11px（原 8pt≈10.7px 偏小，是"糙"的根源）
+        self._f_name = QFont("Microsoft YaHei UI")
+        self._f_name.setPixelSize(13)
+        self._f_name.setWeight(QFont.DemiBold)
+        self._f_reason = QFont("Microsoft YaHei UI")
+        self._f_reason.setPixelSize(11)
+        self._f_badge = QFont("Cascadia Mono", 8)   # 等宽数字（tabular-nums）
+        self._f_badge.setPixelSize(10)
         self._f_badge.setBold(True)
         self._fm_name = QFontMetrics(self._f_name)
         self._fm_reason = QFontMetrics(self._f_reason)
@@ -225,31 +233,40 @@ class CardDelegate(QStyledItemDelegate):
                 p.translate(c.x(), c.y())
                 p.scale(s, s)
                 p.translate(-c.x(), -c.y())
+        dark = isDarkTheme()
         r = QRect(opt.rect).adjusted(5, 5, -5, -5)
         from PySide6.QtWidgets import QStyle
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)
         hovered = bool(opt.state & QStyle.StateFlag.State_MouseOver)
-        # hover 底影（两层递减 alpha 模拟提升）
-        if hovered and not selected:
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(0, 0, 0, 26) if isDarkTheme() else QColor(0, 0, 0, 14))
-            p.drawRoundedRect(QRect(r.left() + 1, r.top() + 3, r.width(), r.height()), 10, 10)
-        # 选中：陶土 wash 底（品牌色渗透——一眼可辨的选中群组）
+        # hover：抬升 -1.5px（CDS CARD_HOVER_LIFT）+ 三层递减手绘阴影
+        # （delegate 自绘无法用 QGraphicsDropShadowEffect，只能多层叠加模拟）
+        if hovered:
+            for dy, al in ((6, 30 if dark else 18), (4, 38 if dark else 22), (2, 46 if dark else 28)):
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(0, 0, 0, al))
+                p.drawRoundedRect(QRect(r.left() + 1, r.top() + dy, r.width() - 2, r.height()),
+                                  CDST.R_CARD, CDST.R_CARD)
+            p.translate(0, CDST.CARD_HOVER_LIFT)
+        # 卡面：选中 = clay 低饱和填充（克制，不刺眼）；否则 surface2
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(CDST.c(dark, CDSTT.clay_fill) if selected
+                          else CDST.c(dark, CDSTT.surface2)))
+        p.drawRoundedRect(r, CDST.R_CARD, CDST.R_CARD)
+        # 单闭合边框原则：只有卡片这一层闭合框
+        p.setBrush(Qt.NoBrush)
         if selected:
-            p.setBrush(QColor(217, 119, 87, 26) if isDarkTheme() else QColor(198, 97, 63, 18))
+            p.setPen(QPen(QColor(CDST.c(dark, CDSTT.border_clay)), 1.5))
+        elif hovered:
+            p.setPen(QPen(QColor(CDST.c(dark, CDSTT.border_strong)), 1))
         else:
-            p.setBrush(_c("#1a1a19", "#ffffff"))
-        p.setPen(QPen(_c("#e08264", "#c6613f") if selected else
-                      (_c("#5a463c", "#d8c3b5") if hovered else _c("#2a2a28", "#e7e4dc")),
-                      1.6 if selected else 1))
-        p.drawRoundedRect(r, 10, 10)
-        # 选中双环：外环 clay 1.5px + 内环 surface-1 1px（CDS 双环聚焦协议）
+            p.setPen(QPen(QColor(CDST.c(dark, CDSTT.border)), 1))
+        p.drawRoundedRect(r, CDST.R_CARD, CDST.R_CARD)
         if selected:
-            p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(_c("#d97757", "#c6613f"), 1.5))
-            p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 11, 11)
-            p.setPen(QPen(_c("#3d2620", "#f7e8e0"), 1))
-            p.drawRoundedRect(r.adjusted(2, 2, -2, -2), 8, 8)
+            # 双环聚焦协议：外环 clay + 内环 surface1
+            p.setPen(QPen(QColor(CDST.CLAY), 1.5))
+            p.drawRoundedRect(r.adjusted(-2, -2, 2, 2), CDST.R_CARD + 2, CDST.R_CARD + 2)
+            p.setPen(QPen(QColor(CDST.c(dark, CDSTT.surface1)), 1))
+            p.drawRoundedRect(r.adjusted(2, 2, -2, -2), CDST.R_CARD - 2, CDST.R_CARD - 2)
         img_r = QRect(r.left() + 8, r.top() + 8, r.width() - 16, r.height() - 62)
         pix = self.thumbs.get(it["path"])
         if pix is not None and not pix.isNull():
@@ -259,25 +276,41 @@ class CardDelegate(QStyledItemDelegate):
         else:
             # —— 骨架屏 + 105° 倾角扫光（CDS cds-skeleton-sweep：2.0s 线性循环）——
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor("#20201f" if isDarkTheme() else "#f0efec"))
-            p.drawRoundedRect(img_r, 8, 8)
+            p.setBrush(QColor(CDST.c(dark, CDSTT.surface3)))
+            p.drawRoundedRect(img_r, CDST.R_LG, CDST.R_LG)
             t = (time.time() % 2.0) / 2.0
             w = img_r.width()
             gx = img_r.left() - w + t * 2.0 * w
             g = QLinearGradient(gx, img_r.top(), gx + w * 0.35, img_r.bottom())
-            sheen = QColor(217, 119, 87, 22) if isDarkTheme() else QColor(198, 97, 63, 14)
+            sheen = QColor(217, 119, 87, 22) if dark else QColor(198, 97, 63, 14)
             g.setColorAt(0.0, QColor(0, 0, 0, 0))
             g.setColorAt(0.35, QColor(0, 0, 0, 0))
             g.setColorAt(0.50, sheen)
             g.setColorAt(0.65, QColor(0, 0, 0, 0))
             g.setColorAt(1.0, QColor(0, 0, 0, 0))
             p.fillRect(img_r, QBrush(g))
+        # 判定徽章（贴在缩略图左下）：语义色药丸（红=广告 / 琥珀=疑似 / 蓝=异常）
+        vrole = CDST.ROLE_BY_VERDICT.get(it["verdict"], "info")
+        vc, vfill, vedge = CDST.sem(dark, vrole)
+        vc = QColor(vc)
+        score = it.get("score", 0)
+        vtext = VERDICT_TEXT.get(it["verdict"], it["verdict"])
+        blabel = f"{vtext} {score:.0f}" if score else vtext
+        bw = self._fm_badge.horizontalAdvance(blabel) + 14
+        br = QRect(img_r.left() + 8, img_r.bottom() - 26, min(bw, img_r.width() - 16), 18)
         p.setPen(Qt.NoPen)
-        p.setBrush(_verdict_color(it["verdict"]))
-        p.drawRoundedRect(QRect(r.left() + 34, r.top() + 4, 30, 3), 1.5, 1.5)
+        p.setBrush(QColor(vfill))
+        p.drawRoundedRect(br, CDST.R_SM, CDST.R_SM)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(vedge), 1))
+        p.drawRoundedRect(br, CDST.R_SM, CDST.R_SM)
+        p.setPen(vc)
+        p.setFont(self._f_badge)
+        p.drawText(br, Qt.AlignCenter, blabel)
         # 文件名（双向截断：扩展名永远保留）+ 右上类型徽标
         name = self._elide_bidir(Path(it["path"]).name, self._fm_name, r.width() - 20)
-        p.setPen(_c("#e08264", "#c6613f") if selected else _c("#f5f5f5", "#151515"))
+        p.setPen(QColor(CDST.c(dark, CDSTT.clay)) if selected
+                 else QColor(CDST.c(dark, CDSTT.text)))
         p.setFont(self._f_name)
         p.drawText(QRect(r.left() + 10, r.bottom() - 50, r.width() - 20, 16),
                    Qt.AlignLeft | Qt.AlignVCenter, name)
@@ -287,9 +320,9 @@ class CardDelegate(QStyledItemDelegate):
             bw = self._fm_badge.horizontalAdvance(btxt) + 10
             br = QRect(r.right() - bw - 8, r.bottom() - 49, bw, 15)
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(0, 0, 0, 96) if isDarkTheme() else QColor(20, 20, 20, 24))
-            p.drawRoundedRect(br, 4, 4)
-            p.setPen(QColor("#d9d6cd" if isDarkTheme() else "#525252"))
+            p.setBrush(QColor(CDST.c(dark, CDSTT.muted)))
+            p.drawRoundedRect(br, CDST.R_SM, CDST.R_SM)
+            p.setPen(QColor(CDST.c(dark, CDSTT.text_2)))
             p.setFont(self._f_badge)
             p.drawText(br, Qt.AlignCenter, btxt)
         reason = self._fm_reason.elidedText("; ".join(h.get("label", "") for h in it["reasons"]),
@@ -301,21 +334,24 @@ class CardDelegate(QStyledItemDelegate):
         # 来源文件夹行（📁 根文件夹名/子目录）
         folder = it.get("_folder") or ""
         if folder:
-            ftext = self._fm_reason.elidedText(folder, Qt.ElideMiddle, r.width() - 30)
-            p.setPen(_c("#7a7a7a", "#7a7a7a"))
+            ftext = self._fm_reason.elidedText(folder, Qt.ElideMiddle, r.width() - 34)
+            p.setPen(QColor(CDST.c(dark, CDSTT.text_2)))
             p.setFont(self._f_reason)
-            # 小文件夹图标 + 名称
-            p.drawText(QRect(r.left() + 10, r.bottom() - 17, 12, 13),
-                       Qt.AlignLeft | Qt.AlignVCenter, "📁")
-            p.drawText(QRect(r.left() + 23, r.bottom() - 17, r.width() - 33, 13),
+            # 自绘文件夹小图标（不用 emoji——部分字体缺字形会显示成方块）
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(CDST.c(dark, CDSTT.text_3)))
+            p.drawRoundedRect(QRect(r.left() + 10, r.bottom() - 15, 11, 8), 2, 2)
+            p.drawRoundedRect(QRect(r.left() + 10, r.bottom() - 18, 5, 3), 1, 1)
+            p.setPen(QColor(CDST.c(dark, CDSTT.text_2)))
+            p.drawText(QRect(r.left() + 25, r.bottom() - 18, r.width() - 35, 14),
                        Qt.AlignLeft | Qt.AlignVCenter, ftext)
         cr = QRect(r.left() + 8, r.top() + 8, 22, 22)
         checked = it["path"] in self.model.checked
         if checked:
-            p.setBrush(_c("#d97757", "#c15f3c"))
+            p.setBrush(QColor(CDST.c(dark, CDSTT.clay)))
             p.setPen(Qt.NoPen)
             p.drawEllipse(cr)
-            p.setPen(QPen(QColor("#ffffff"), 2))
+            p.setPen(QPen(QColor(CDST.c(dark, CDSTT.text_on_clay)), 2))
             p.drawLine(cr.left() + 6, cr.center().y(), cr.center().x() - 1, cr.bottom() - 7)
             p.drawLine(cr.center().x() - 1, cr.bottom() - 7, cr.right() - 5, cr.top() + 7)
         elif hovered:
@@ -324,7 +360,8 @@ class CardDelegate(QStyledItemDelegate):
             p.drawEllipse(cr)
         gi = self.model.sim_map.get(it["path"])
         if gi is not None:
-            p.setPen(QPen(_c("#e5a184", "#8a5a44")))
+            # 相似组用琥珀（warn）——与判定的 clay/红区分开，形成色彩层次
+            p.setPen(QPen(QColor(CDST.c(dark, CDSTT.warn))))
             p.setFont(self._f_reason)
             p.drawText(QRect(r.right() - 48, r.top() + 6, 40, 16),
                        Qt.AlignRight | Qt.AlignVCenter, f"⟲{len(self.model.sim_groups[gi])}")
@@ -1138,19 +1175,23 @@ class StatusDot(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
+        d = isDarkTheme()
+        # 语义色：running=橙(品牌动作) done=绿 error=红 warn=琥珀 ready=灰
         if self._state == "error":
-            c = QColor("#f87171" if isDarkTheme() else "#dc2626")
-            r = 3.0
+            c, r = QColor(CDST.c(d, CDSTT.danger)), 3.0
+        elif self._state == "done":
+            c, r = QColor(CDST.c(d, CDSTT.ok)), 3.0
+        elif self._state == "warn":
+            c, r = QColor(CDST.c(d, CDSTT.warn)), 3.0
         elif self._state == "running":
-            c = QColor("#d97757")
+            c = QColor(CDST.c(d, CDSTT.clay))
             # clay 呼吸：scale 0.86 → 1.0、亮度 0.96 → 1.06
             ph = (math.sin(self._t * 2 * math.pi) + 1) / 2
             r = 3.0 * (0.86 + 0.14 * ph)
             h, s, v, a = c.getHsvF()
             c = QColor.fromHsvF(h, s, min(1.0, v * (0.96 + 0.10 * ph)), a)
         else:
-            c = QColor("#d97757")
-            r = 3.0
+            c, r = QColor(CDST.c(d, CDSTT.text_3)), 3.0
         p.setBrush(c)
         p.drawEllipse(int(5 - r), int(5 - r), int(r * 2), int(r * 2))
 
@@ -1235,75 +1276,77 @@ class App(FramelessWindow):
 
     # ---------- 主题 ----------
     def _apply_theme(self):
-        if isDarkTheme():
-            self.setStyleSheet("""
-                /* CDS 真实令牌：surface-1 主画布 / surface-0 侧栏底层 / surface-2 卡片 / surface-3 高层 */
-                #mainWindow { background: #151515; }
-                #topBar { background: #0b0b0b; border-bottom: 1px solid rgba(217,119,87,0.16); }
-                #bottomBar { background: #0b0b0b; border-top: 1px solid rgba(217,119,87,0.16); }
-                #detailPanel { background: #1a1a19; border-left: 1px solid rgba(217,119,87,0.12); }
-                #folderBar { background: #101010; border-bottom: 1px solid rgba(217,119,87,0.10); }
-                #folderChip {
-                    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.09);
-                    border-radius: 6px;
-                }
-                #folderChip QLabel { background: transparent; color: #a3a3a3; font-size: 12px; }
-                #folderChip QToolButton {
-                    border: none; background: transparent; color: rgba(217,214,205,0.42);
-                    font-size: 11px; border-radius: 8px;
-                }
-                #folderChip QToolButton:hover { color: #ff8a6b; background: rgba(217,119,87,0.20); }
-                #folderChip[done="true"] { background: rgba(143,188,143,0.12); border-color: rgba(143,188,143,0.45); }
-                #folderChip[done="true"] QLabel { color: #a8cf9f; }
-                #folderChip[active="true"] {
-                    border-color: rgba(217,119,87,0.85); background: rgba(217,119,87,0.16);
-                }
-                #folderChip[active="true"] QLabel { color: #f0b39a; }
-                #folderHint { color: #666666; font-size: 12px; }
-                #currentFile { color: #a3a3a3; font-size: 12px; }
-                QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
-                QScrollBar::handle:vertical { background: rgba(217,119,87,0.30); border-radius: 5px; min-height: 40px; }
-                QScrollBar::handle:vertical:hover { background: rgba(217,119,87,0.50); }
-                QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
-                QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
-            """)
-        else:
-            self.setStyleSheet("""
-                #mainWindow { background: #fcfcfb; }
-                #topBar { background: #f9f9f7; border-bottom: 1px solid rgba(198,97,63,0.22); }
-                #bottomBar { background: #f9f9f7; border-top: 1px solid rgba(198,97,63,0.22); }
-                #detailPanel { background: #ffffff; border-left: 1px solid rgba(198,97,63,0.18); }
-                #folderBar { background: #f6f6f4; border-bottom: 1px solid rgba(198,97,63,0.14); }
-                #folderChip {
-                    background: #ffffff; border: 1px solid rgba(20,20,20,0.10);
-                    border-radius: 6px;
-                }
-                #folderChip QLabel { background: transparent; color: #525252; font-size: 12px; }
-                #folderChip QToolButton {
-                    border: none; background: transparent; color: rgba(74,71,63,0.40);
-                    font-size: 11px; border-radius: 8px;
-                }
-                #folderChip QToolButton:hover { color: #b3402a; background: rgba(193,95,60,0.12); }
-                #folderChip[done="true"] { background: rgba(61,122,74,0.08); border-color: rgba(61,122,74,0.35); }
-                #folderChip[done="true"] QLabel { color: #3d7a4a; }
-                #folderChip[active="true"] {
-                    border-color: rgba(193,95,60,0.8); background: rgba(198,97,63,0.12);
-                }
-                #folderChip[active="true"] QLabel { color: #8a5a44; }
-                #folderHint { color: #8a8a8a; font-size: 12px; }
-                #currentFile { color: #525252; font-size: 12px; }
-                QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
-                QScrollBar::handle:vertical { background: rgba(198,97,63,0.28); border-radius: 5px; min-height: 40px; }
-                QScrollBar::handle:vertical:hover { background: rgba(198,97,63,0.45); }
-                QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
-                QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
-            """)
+        """令牌驱动的主题 QSS。色彩分层原则：
+        品牌橙只出现在「主动作 / 当前项 / 进度」；判定与状态一律走语义色；其余全用暖灰阶梯。"""
+        d = isDarkTheme()
+        TT = CDSTT
+        root_bg = CDST.c(d, TT.root_bg)
+        s0 = CDST.c(d, TT.surface0)
+        s1 = CDST.c(d, TT.surface1)
+        s2 = CDST.c(d, TT.surface2)
+        s3 = CDST.c(d, TT.surface3)
+        bdr = CDST.c(d, TT.border)
+        bdr_soft = CDST.c(d, TT.border_soft)
+        txt = CDST.c(d, TT.text)
+        txt2 = CDST.c(d, TT.text_2)
+        txt3 = CDST.c(d, TT.text_3)
+        hov = CDST.c(d, TT.hover)
+        clay = CDST.c(d, TT.clay)
+        clay_fill = CDST.c(d, TT.clay_fill)
+        clay_edge = CDST.c(d, TT.border_clay)
+        ok_fg, ok_fill, ok_edge = CDST.sem(d, "ok")
+        gray_fg, gray_fill, gray_edge = CDST.sem(d, "gray")
+        # 滚动条走暖灰（不再用品牌橙满屏刷存在感）
+        sb = "rgba(20,20,20,0.22)" if not d else "rgba(255,255,255,0.20)"
+        sb_h = "rgba(20,20,20,0.38)" if not d else "rgba(255,255,255,0.34)"
+
+        self.setStyleSheet(f"""
+            #mainWindow {{ background: {root_bg}; }}
+            /* 顶/底栏：surface0 + 发丝（单一闭合描边，不做双向边） */
+            #topBar {{ background: {s0}; border-bottom: 1px solid {bdr}; }}
+            #bottomBar {{ background: {s0}; border-top: 1px solid {bdr}; }}
+            #filterBar {{ background: {s1}; border-bottom: 1px solid {bdr_soft}; }}
+            #detailPanel {{ background: {s1}; border-left: 1px solid {bdr}; }}
+            #detailHead {{ background: transparent; border-bottom: 1px solid {bdr_soft}; }}
+            #gridWrap {{ background: transparent; }}
+            #folderBar {{ background: {s0}; border-bottom: 1px solid {bdr_soft}; }}
+            /* 预览画布：surface2 + 发丝，圆角 12 */
+            #previewCanvas {{ background: {s2}; border: 1px solid {bdr};
+                border-radius: {CDST.R_CARD}px; color: {txt3}; }}
+            #vsep {{ background: {bdr}; }}
+            /* 文件夹 chip：中性；完成=绿；当前=品牌橙 */
+            #folderChip {{ background: {s2}; border: 1px solid {bdr}; border-radius: {CDST.R_MD}px; }}
+            #folderChip QLabel {{ background: transparent; color: {txt2}; font-size: 12px; }}
+            #folderChip QToolButton {{
+                border: none; background: transparent; color: {txt3};
+                font-size: 11px; border-radius: {CDST.R_LG}px;
+            }}
+            #folderChip QToolButton:hover {{ color: {clay}; background: {clay_fill}; }}
+            #folderChip[done="true"] {{ background: {ok_fill}; border-color: {ok_edge}; }}
+            #folderChip[done="true"] QLabel {{ color: {ok_fg}; }}
+            #folderChip[active="true"] {{ border-color: {clay_edge}; background: {clay_fill}; }}
+            #folderChip[active="true"] QLabel {{ color: {clay}; }}
+            #folderHint {{ color: {txt3}; font-size: 12px; }}
+            #currentFile {{ color: {txt2}; font-size: 12px; }}
+            QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
+            QScrollBar::handle:vertical {{ background: {sb}; border-radius: 5px; min-height: 40px; }}
+            QScrollBar::handle:vertical:hover {{ background: {sb_h}; }}
+            QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0; }}
+            QScrollBar::handle:horizontal {{ background: {sb}; border-radius: 5px; min-width: 40px; }}
+            QScrollBar::handle:horizontal:hover {{ background: {sb_h}; }}
+            QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+            QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+        """)
         self._apply_brand_style()
         self._apply_info_bg()
         if hasattr(self, "log"):
             self._apply_log_bg()
         if hasattr(self, "seg_disposal"):
             self.seg_disposal.refresh_theme()   # 分段胶囊轨道/滑块/文字随主题重建
+        if hasattr(self, "status_pill"):
+            # 控件自定义样式按「当前主题」生成（setCustomStyleSheet 双套参数在部分
+            # 组件上不重放——见踩坑记录），所以主题切换必须整体重刷一次
+            self._apply_styles()
 
     def _apply_brand_style(self):
         # 品牌在 TitleBar 内置（双色字 + 主题同步）
@@ -1313,19 +1356,60 @@ class App(FramelessWindow):
 
     def _apply_log_bg(self):
         from qfluentwidgets import setCustomStyleSheet
-        qss = ("TextEdit { background: #0b0b0b; border-top: 1px solid rgba(255,255,255,0.09);"
-               " color: #a3a3a3; }"
-               if isDarkTheme() else
-               "TextEdit { background: #f9f9f7; border-top: 1px solid rgba(20,20,20,0.10);"
-               " color: #525252; }")
+        d = isDarkTheme()
+        qss = (f"TextEdit {{ background: {CDST.c(d, CDSTT.surface0)};"
+               f" border-top: 1px solid {CDST.c(d, CDSTT.border)};"
+               f" color: {CDST.c(d, CDSTT.text_2)}; }}")
         setCustomStyleSheet(self.log, qss, qss)
 
     def _apply_info_bg(self):
-        qss = ("TextEdit { background: #20201f; border: 1px solid rgba(255,255,255,0.09);"
-               " border-radius: 10px; color: #a3a3a3; }") if isDarkTheme() else \
-              ("TextEdit { background: #ffffff; border: 1px solid rgba(20,20,20,0.10);"
-               " border-radius: 10px; color: #525252; }")
+        d = isDarkTheme()
+        qss = (f"TextEdit {{ background: {CDST.c(d, CDSTT.surface2)};"
+               f" border: 1px solid {CDST.c(d, CDSTT.border)};"
+               f" border-radius: {CDST.R_PANEL}px; color: {CDST.c(d, CDSTT.text_2)}; }}")
         setCustomStyleSheet(self.info, qss, qss)
+
+    # ---------- 工具条零件 ----------
+    @staticmethod
+    def _vsep(parent, h=16):
+        """1px 发丝竖分隔（CDS：容器内部只用单向发丝，不用双向描边）"""
+        f = QFrame(parent)
+        f.setObjectName("vsep")
+        f.setFrameShape(QFrame.NoFrame)
+        f.setFixedSize(1, h)
+        return f
+
+    # 状态语义：文本关键词 → 语义角色（决定胶囊底色 / 文字色 / 指示灯色）
+    _STATUS_RULES = (
+        ("ok", ("扫描完成", "处置完成", "恢复完成", "已选中", "已导出")),
+        ("warn", ("暂停", "已取消", "取消中", "未发现")),
+        ("danger", ("失败", "出错", "错误", "异常")),
+        ("clay", ("正在", "收集", "扫描中", "预处理", "继续", "命中", "处置中", "/")),
+    )
+    _DOT_BY_ROLE = {"ok": "done", "warn": "warn", "danger": "error",
+                    "clay": "running", "gray": "ready"}
+
+    def set_status(self, text, role=None):
+        """设置状态文本并按语义着色（替代裸 status.setText）。"""
+        self.status.setText(text)
+        if role is None:
+            role = "gray"
+            for r, keys in self._STATUS_RULES:
+                if any(k in text for k in keys):
+                    role = r
+                    break
+        self._status_role = role
+        self._paint_status_pill()
+        return self
+
+    def _paint_status_pill(self):
+        d = isDarkTheme()
+        role = getattr(self, "_status_role", "gray")
+        fg, fill, edge = CDST.sem(d, role)
+        self.status_pill.setStyleSheet(
+            f"#statusPill {{ background: {fill}; border: 1px solid {edge}; border-radius: {CDST.R_FULL}px; }}")
+        self.status.setStyleSheet(f"color: {fg}; background: transparent;")
+        self.dot.set_state(self._DOT_BY_ROLE.get(role, "ready"))
 
     def toggle_theme(self):
         # —— 主题切换 cross-fade：先抓旧画面，切换后旧画面渐隐、新主题透出 ——
@@ -1366,19 +1450,23 @@ class App(FramelessWindow):
         root.setSpacing(0)
         self._root_layout = root   # 布局管理器需要它做「底部条 停靠↔悬浮」切换
 
-        # 顶部工具栏
+        # 顶部工具栏 —— CDS 工具条：动作分组 + 1px 发丝分隔 + 右侧语义状态胶囊
         top = QWidget(self)
         top.setObjectName("topBar")
-        top.setFixedHeight(54)
+        top.setFixedHeight(52)
         tl = QHBoxLayout(top)
-        tl.setContentsMargins(18, 8, 14, 8)
-        tl.setSpacing(8)
+        tl.setContentsMargins(14, 0, 12, 0)
+        tl.setSpacing(4)
+        self.top_bar = top
         self.brand = self._titlebar.brand   # 品牌在标题栏正中（TitleBar 内）
+
+        # 组 1：扫描动作（品牌橙 = 主行动）
         self.btn_add = TransparentPushButton(FIF.FOLDER_ADD, "添加文件夹", top)
         self.btn_add.clicked.connect(self.add_folder)
         tl.addWidget(self.btn_add)
         self.btn_scan = PrimaryPushButton(FIF.PLAY, "开始扫描", top)
         self.btn_scan.setFixedWidth(112)
+        self.btn_scan.setFixedHeight(32)
         self.btn_scan.clicked.connect(self.start_scan)
         tl.addWidget(self.btn_scan)
         self.btn_pause = TransparentPushButton(FIF.PAUSE, "暂停", top)
@@ -1388,25 +1476,49 @@ class App(FramelessWindow):
         self.btn_cancel = TransparentPushButton(FIF.CANCEL, "取消", top)
         self.btn_cancel.clicked.connect(self.cancel_scan)
         tl.addWidget(self.btn_cancel)
+
+        tl.addSpacing(4)
+        tl.addWidget(self._vsep(top))
+        tl.addSpacing(4)
+
+        # 组 2：中性工具（灰阶，不抢品牌色）
         self.btn_cfg = ToolButton(FIF.SETTING, top)
         self.btn_cfg.setToolTip("扫描设置与规则")
+        self.btn_cfg.setFixedSize(32, 32)
         self.btn_cfg.clicked.connect(self.open_config)
         tl.addWidget(self.btn_cfg)
         self.btn_history = ToolButton(FIF.HISTORY, top)
         self.btn_history.setToolTip("扫描历史记录")
+        self.btn_history.setFixedSize(32, 32)
         self.btn_history.clicked.connect(self.open_history)
         tl.addWidget(self.btn_history)
         self.btn_export = ToolButton(FIF.SAVE, top)
         self.btn_export.setToolTip("导出当前结果为 CSV 报告")
+        self.btn_export.setFixedSize(32, 32)
         self.btn_export.clicked.connect(self.export_report)
         tl.addWidget(self.btn_export)
+
         tl.addStretch(1)
-        self.dot = StatusDot(top)
-        tl.addWidget(self.dot)
-        self.status = CaptionLabel("就绪", top)
-        tl.addWidget(self.status)
+
+        # 组 3：状态胶囊（语义色：橙=进行中 / 绿=完成 / 红=异常 / 灰=就绪）
+        self.status_pill = QWidget(top)
+        self.status_pill.setObjectName("statusPill")
+        spl = QHBoxLayout(self.status_pill)
+        spl.setContentsMargins(10, 0, 12, 0)
+        spl.setSpacing(7)
+        self.dot = StatusDot(self.status_pill)
+        spl.addWidget(self.dot)
+        self.status = CaptionLabel("就绪", self.status_pill)
+        spl.addWidget(self.status)
+        tl.addWidget(self.status_pill)
+        self._status_role = "gray"
+
+        tl.addSpacing(4)
+        tl.addWidget(self._vsep(top))
+        tl.addSpacing(4)
         self.btn_theme = TransparentToolButton(FIF.BRIGHTNESS, top)
         self.btn_theme.setToolTip("切换浅色 / 深色")
+        self.btn_theme.setFixedSize(32, 32)
         self.btn_theme.clicked.connect(self.toggle_theme)
         tl.addWidget(self.btn_theme)
         root.addWidget(top)
@@ -1424,41 +1536,67 @@ class App(FramelessWindow):
 
         left = QWidget(self)
         ll = QVBoxLayout(left)
-        ll.setContentsMargins(14, 10, 10, 8)
-        ll.setSpacing(8)
-        frow = QHBoxLayout()
-        frow.setSpacing(8)
-        self.f_verdict = ComboBox(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(0)
+
+        # —— 筛选条：独立表面（surface1）+ 底部发丝，控件为 CDS 扁平选择 ——
+        fbar = QWidget(left)
+        fbar.setObjectName("filterBar")
+        fbar.setFixedHeight(46)
+        fl = QHBoxLayout(fbar)
+        fl.setContentsMargins(16, 0, 16, 0)
+        fl.setSpacing(6)
+        self.filter_bar = fbar
+        self.f_verdict = ComboBox(fbar)
         self.f_verdict.addItems(["全部", "广告", "疑似"])
-        self.f_verdict.setFixedWidth(86)
+        self.f_verdict.setFixedWidth(88)
+        self.f_verdict.setFixedHeight(30)
         self.f_verdict.currentIndexChanged.connect(lambda _i: self.refresh())
-        frow.addWidget(self.f_verdict)
-        self.f_reason = ComboBox(left)
+        fl.addWidget(self.f_verdict)
+        self.f_reason = ComboBox(fbar)
         self.f_reason.addItems(["全部原因"])
-        self.f_reason.setFixedWidth(150)
+        self.f_reason.setFixedWidth(158)
+        self.f_reason.setFixedHeight(30)
         self.f_reason.currentIndexChanged.connect(lambda _i: self.refresh())
-        frow.addWidget(self.f_reason)
-        self.f_search = SearchLineEdit(left)
+        fl.addWidget(self.f_reason)
+        self.f_search = SearchLineEdit(fbar)
         self.f_search.setPlaceholderText("路径过滤…")
-        self.f_search.setFixedWidth(180)
+        self.f_search.setFixedWidth(200)
+        self.f_search.setFixedHeight(30)
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(250)
         self._search_timer.timeout.connect(self.refresh)
         self.f_search.textChanged.connect(lambda _t: self._search_timer.start())
-        frow.addWidget(self.f_search)
-        self.f_sort = ComboBox(left)
+        fl.addWidget(self.f_search)
+        self.f_sort = ComboBox(fbar)
         self.f_sort.addItems(["默认顺序", "名称", "大小", "修改时间", "分数"])
-        self.f_sort.setFixedWidth(104)
+        self.f_sort.setFixedWidth(108)
+        self.f_sort.setFixedHeight(30)
         self.f_sort.setToolTip("结果排序方式")
         self.f_sort.currentIndexChanged.connect(lambda _i: self.refresh())
-        frow.addWidget(self.f_sort)
-        frow.addStretch(1)
-        self.lbl_count = CaptionLabel("命中 0 · 已选 0", left)
-        frow.addWidget(self.lbl_count)
-        ll.addLayout(frow)
+        fl.addWidget(self.f_sort)
+        fl.addStretch(1)
+        # 计数：中性「命中」+ 语义「已选」（>0 时用品牌橙，0 时灰）
+        self.lbl_count = QWidget(fbar)
+        cl = QHBoxLayout(self.lbl_count)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(6)
+        self.pill_hit = QLabel("命中 0", self.lbl_count)
+        self.pill_hit.setObjectName("countPill")
+        cl.addWidget(self.pill_hit)
+        self.pill_sel = QLabel("已选 0", self.lbl_count)
+        self.pill_sel.setObjectName("countPill")
+        cl.addWidget(self.pill_sel)
+        fl.addWidget(self.lbl_count)
+        ll.addWidget(fbar)
 
-        self.grid = QListView(left)
+        gwrap = QWidget(left)
+        gwrap.setObjectName("gridWrap")
+        gl = QVBoxLayout(gwrap)
+        gl.setContentsMargins(16, 12, 12, 10)
+        gl.setSpacing(0)
+        self.grid = QListView(gwrap)
         self.grid.setObjectName("grid")
         self.grid.setViewMode(QListView.IconMode)
         self.grid.setResizeMode(QListView.Adjust)
@@ -1488,7 +1626,8 @@ class App(FramelessWindow):
         sb.valueChanged.connect(self._sync_fade_visibility)
         sb.rangeChanged.connect(lambda *_: self._sync_fade_visibility())
         self.grid.customContextMenuRequested.connect(self._on_context_menu)
-        ll.addWidget(self.grid, 1)
+        gl.addWidget(self.grid, 1)
+        ll.addWidget(gwrap, 1)
         self.grid.viewport().installEventFilter(self)
         self.grid.installEventFilter(self)
         mid.addWidget(left, 1)
@@ -1498,57 +1637,86 @@ class App(FramelessWindow):
         self.detail = detail
         detail.setFixedWidth(360)
         dv = QVBoxLayout(detail)
-        dv.setContentsMargins(14, 14, 14, 12)
-        dv.setSpacing(8)
-        dv.addWidget(CaptionLabel("详情", detail))
-        self.preview = QLabel("选中图片查看预览", detail)
+        dv.setContentsMargins(0, 0, 0, 0)
+        dv.setSpacing(0)
+
+        # 头部：标题 + 判定徽标（语义色）
+        dh = QWidget(detail)
+        dh.setObjectName("detailHead")
+        dh.setFixedHeight(46)
+        dhl = QHBoxLayout(dh)
+        dhl.setContentsMargins(16, 0, 16, 0)
+        dhl.setSpacing(8)
+        dhl.addWidget(CaptionLabel("详情", dh))
+        dhl.addStretch(1)
+        self.detail_badge = QLabel("未选中", dh)
+        self.detail_badge.setObjectName("detailBadge")
+        dhl.addWidget(self.detail_badge)
+        dv.addWidget(dh)
+
+        # 预览画布：独立圆角容器 + 发丝边（不再是裸 QLabel 贴文字）
+        dbody = QWidget(detail)
+        dbl = QVBoxLayout(dbody)
+        dbl.setContentsMargins(16, 12, 16, 12)
+        dbl.setSpacing(10)
+        self.preview = QLabel("", dbody)
+        self.preview.setObjectName("previewCanvas")
         self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setStyleSheet("color:rgba(140,134,124,0.7);")
-        self.preview.setMinimumHeight(150)
-        dv.addWidget(self.preview, 1)
-        self.info = TextEdit(detail)
+        self.preview.setMinimumHeight(180)
+        dbl.addWidget(self.preview, 1)
+        self.info = TextEdit(dbody)
         self.info.setReadOnly(True)
         self.info.setFixedHeight(152)
-        dv.addWidget(self.info)
+        dbl.addWidget(self.info)
+        # 动作行：‹ › 中性 / 标记广告=红 / 保留=绿 / 大图=幽灵
         drow = QHBoxLayout()
         drow.setSpacing(6)
-        self.btn_prev = ToolButton(detail)
+        self.btn_prev = ToolButton(dbody)
         self.btn_prev.setText("‹")
         self.btn_prev.setToolTip("上一张（←）")
+        self.btn_prev.setFixedSize(32, 32)
         self.btn_prev.clicked.connect(lambda: self.step(-1))
         drow.addWidget(self.btn_prev)
-        self.btn_next = ToolButton(detail)
+        self.btn_next = ToolButton(dbody)
         self.btn_next.setText("›")
         self.btn_next.setToolTip("下一张（→）")
+        self.btn_next.setFixedSize(32, 32)
         self.btn_next.clicked.connect(lambda: self.step(1))
         drow.addWidget(self.btn_next)
-        self.btn_mark = PushButton("标记广告", detail)
+        self.btn_mark = PushButton("标记广告", dbody)
+        self.btn_mark.setFixedHeight(32)
         self.btn_mark.clicked.connect(lambda: self.mark_current(True))
         drow.addWidget(self.btn_mark)
-        self.btn_keep = PushButton("保留", detail)
+        self.btn_keep = PushButton("保留", dbody)
+        self.btn_keep.setFixedHeight(32)
         self.btn_keep.clicked.connect(lambda: self.mark_current(False))
         drow.addWidget(self.btn_keep)
         drow.addStretch(1)
-        self.btn_big = TransparentPushButton(FIF.ZOOM_IN, "大图", detail)
+        self.btn_big = TransparentPushButton(FIF.ZOOM_IN, "大图", dbody)
         self.btn_big.clicked.connect(self.open_big)
         drow.addWidget(self.btn_big)
-        dv.addLayout(drow)
+        dbl.addLayout(drow)
+        dv.addWidget(dbody, 1)
         mid.addWidget(detail)
         root.addLayout(mid, 1)
 
         # 底部状态条
         bot = QWidget(self)
         bot.setObjectName("bottomBar")
-        bot.setFixedHeight(62)
+        bot.setFixedHeight(60)
         bl = QHBoxLayout(bot)
-        bl.setContentsMargins(16, 12, 14, 12)
-        bl.setSpacing(12)
+        bl.setContentsMargins(14, 0, 14, 0)
+        bl.setSpacing(8)
         self.progress = self.folder_bar.progress  # 进度条合并到文件夹条
         self.btn_log = TransparentPushButton("操作日志", bot)
         self.btn_log.setCheckable(True)
         self.btn_log.toggled.connect(self.toggle_log)
         bl.addWidget(self.btn_log)
-        bl.addWidget(CaptionLabel("处置", bot))
+        bl.addSpacing(4)
+        bl.addWidget(self._vsep(bot))
+        bl.addSpacing(4)
+        self.lbl_disposal = CaptionLabel("处置方式", bot)
+        bl.addWidget(self.lbl_disposal)
         self.seg_disposal = Segmented(
             [("隔离", "quarantine"), ("回收站", "recycle"), ("删除", "delete")], bot)
         self.seg_disposal.setFixedWidth(240)
@@ -1571,7 +1739,12 @@ class App(FramelessWindow):
         self.btn_restore = TransparentPushButton("恢复隔离区…", bot)
         self.btn_restore.clicked.connect(self.restore_ui)
         bl.addWidget(self.btn_restore)
+        bl.addSpacing(4)
+        bl.addWidget(self._vsep(bot))
+        bl.addSpacing(4)
+        # 破坏性动作 = 语义红，与"开始扫描"的品牌橙分工
         self.btn_dispose = PrimaryPushButton(FIF.DELETE, "执行处置", bot)
+        self.btn_dispose.setFixedHeight(32)
         self.btn_dispose.clicked.connect(self.execute_disposal)
         bl.addWidget(self.btn_dispose)
         root.addWidget(bot)
@@ -1610,61 +1783,114 @@ class App(FramelessWindow):
         self._apply_styles()
 
     def _apply_styles(self):
-        W = {
-            "disp": ("""PushButton { background: transparent; border: 1px solid rgba(20,20,20,0.18); border-radius: 8px; padding: 4px 14px; color: #151515; }
-            PushButton:hover { background: rgba(20,20,20,0.05); }
-            PushButton:checked { background: #c6613f; border-color: #c6613f; color: #ffffff; }""",
-                """PushButton { background: transparent; border: 1px solid rgba(255,255,255,0.18); border-radius: 8px; padding: 4px 14px; color: #f5f5f5; }
-            PushButton:hover { background: rgba(255,255,255,0.06); }
-            PushButton:checked { background: #c6613f; border-color: #c6613f; color: #ffffff; }"""),
-            "primary": ("""PrimaryPushButton { background: #c6613f; border: none; border-radius: 8px; padding: 6px 16px; color: #ffffff; }
-            PrimaryPushButton:hover { background: #cc5a36; }
-            PrimaryPushButton:disabled { background: rgba(20,20,20,0.10); color: rgba(20,20,20,0.30); }""",
-                """PrimaryPushButton { background: #c6613f; border: none; border-radius: 8px; padding: 6px 16px; color: #ffffff; }
-            PrimaryPushButton:hover { background: #d97757; }
-            PrimaryPushButton:disabled { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.28); }"""),
-            "trans": ("""TransparentPushButton { background: transparent; border: none; border-radius: 8px; padding: 4px 10px; color: #a34a2c; }
-            TransparentPushButton:hover { background: rgba(198,97,63,0.08); }""",
-                """TransparentPushButton { background: transparent; border: none; border-radius: 8px; padding: 4px 10px; color: #e5a184; }
-            TransparentPushButton:hover { background: rgba(217,119,87,0.12); }"""),
-            "push": ("""PushButton { background: transparent; border: 1px solid rgba(20,20,20,0.18); border-radius: 8px; padding: 5px 14px; color: #151515; }
-            PushButton:hover { background: rgba(20,20,20,0.05); }""",
-                """PushButton { background: transparent; border: 1px solid rgba(255,255,255,0.18); border-radius: 8px; padding: 5px 14px; color: #f5f5f5; }
-            PushButton:hover { background: rgba(255,255,255,0.06); }"""),
-            "input": ("""ComboBox, SearchLineEdit { background: #ffffff; border: 1px solid rgba(20,20,20,0.10); border-radius: 8px; padding: 4px 10px; color: #151515; }
-            ComboBox:focus, SearchLineEdit:focus { border: 1px solid #c6613f; }
-            ComboBox::drop-down { border: none; width: 24px; }""",
-                """ComboBox, SearchLineEdit { background: #20201f; border: 1px solid rgba(255,255,255,0.09); border-radius: 8px; padding: 4px 10px; color: #f5f5f5; }
-            ComboBox:focus, SearchLineEdit:focus { border: 1px solid #d97757; }
-            ComboBox::drop-down { border: none; width: 24px; }"""),
-            "radio": ("""RadioButton { color: #1f1e1d; spacing: 5px; min-height: 24px; padding: 2px 0; }
-            RadioButton::indicator { width: 14px; height: 14px; border-radius: 7px; border: 1px solid rgba(31,30,29,0.25); }
-            RadioButton::indicator:checked { background: #c15f3c; border-color: #c15f3c; }""",
-                """RadioButton { color: #f5f4ef; spacing: 5px; min-height: 24px; padding: 2px 0; }
-            RadioButton::indicator { width: 14px; height: 14px; border-radius: 7px; border: 1px solid rgba(245,244,239,0.28); }
-            RadioButton::indicator:checked { background: #d97757; border-color: #d97757; }"""),
-            "tool": ("""ToolButton { background: transparent; border: 1px solid rgba(20,20,20,0.16); border-radius: 8px; }
-            ToolButton:hover { background: rgba(20,20,20,0.05); }""",
-                """ToolButton { background: transparent; border: 1px solid rgba(255,255,255,0.16); border-radius: 8px; }
-            ToolButton:hover { background: rgba(255,255,255,0.06); }"""),
-            "progress": ("""ProgressBar { background: rgba(31,30,29,0.08); border: none; border-radius: 3px; height: 4px; min-height: 4px; max-height: 4px; }
-            ProgressBar::chunk { background: #c15f3c; border-radius: 3px; }""",
-                """ProgressBar { background: rgba(245,244,239,0.08); border: none; border-radius: 3px; height: 4px; min-height: 4px; max-height: 4px; }
-            ProgressBar::chunk { background: #d97757; border-radius: 3px; }"""),
-        }
-        for w in (self.btn_scan, self.btn_dispose):
-            setCustomStyleSheet(w, *W["primary"])
-        for w in (self.btn_add, self.btn_cancel, self.btn_openq, self.btn_restore, self.btn_big):
-            setCustomStyleSheet(w, *W["trans"])
-        for w in (self.btn_mark, self.btn_keep):
-            setCustomStyleSheet(w, *W["push"])
-        for w in (self.f_verdict, self.f_reason, self.f_search):
-            setCustomStyleSheet(w, *W["input"])
-        # Segmented 自带样式，不走 W["disp"]
-        for w in (self.btn_cfg, self.btn_theme, self.btn_prev, self.btn_next):
-            setCustomStyleSheet(w, *W["tool"])
-        setCustomStyleSheet(self.btn_log, *W["trans"])
-        setCustomStyleSheet(self.progress, *W["progress"])
+        """全部按 cds_tokens 生成，且按「角色」上色：
+        品牌橙=主动作 / 红=破坏性+广告 / 绿=保留+完成 / 琥珀=疑似 / 蓝=异常 / 暖灰=中性。"""
+        d = isDarkTheme()
+        TT = CDSTT
+        txt = CDST.c(d, TT.text)
+        txt2 = CDST.c(d, TT.text_2)
+        on = CDST.c(d, TT.text_on_clay)
+        clay = CDST.c(d, TT.clay)
+        clay_h = CDST.c(d, CDST.CLAY_HOVER)
+        clay_fill = CDST.c(d, TT.clay_fill)
+        hov = CDST.c(d, TT.hover)
+        bdr = CDST.c(d, TT.border)
+        surf2 = CDST.c(d, TT.surface2)
+        surf3 = CDST.c(d, TT.surface3)
+        dis_bg = "rgba(20,20,20,0.06)" if not d else "rgba(255,255,255,0.06)"
+        dis_fg = "rgba(20,20,20,0.30)" if not d else "rgba(255,255,255,0.28)"
+        dang_fg, dang_fill, dang_edge = CDST.sem(d, "danger")
+        ok_fg, ok_fill, ok_edge = CDST.sem(d, "ok")
+        gray_fg, gray_fill, gray_edge = CDST.sem(d, "gray")
+
+        def pair(tpl):
+            """同一套模板在两套主题下取色（模板里所有值都已按当前主题算好）。"""
+            return tpl
+
+        # 品牌橙实底（开始扫描）
+        primary = pair(f"""PrimaryPushButton {{ background: {clay}; border: none;
+            border-radius: {CDST.R_LG}px; padding: 6px 16px; color: {on}; }}
+            PrimaryPushButton:hover {{ background: {clay_h}; }}
+            PrimaryPushButton:pressed {{ background: {clay}; }}
+            PrimaryPushButton:disabled {{ background: {dis_bg}; color: {dis_fg}; }}""")
+        # 语义红实底（执行处置：破坏性动作）
+        danger = pair(f"""PrimaryPushButton {{ background: {dang_fg}; border: none;
+            border-radius: {CDST.R_LG}px; padding: 6px 16px; color: #ffffff; }}
+            PrimaryPushButton:hover {{ background: {dang_fg}; }}
+            PrimaryPushButton:disabled {{ background: {dis_bg}; color: {dis_fg}; }}""")
+        # 中性幽灵（次要动作：一律暖灰，不再全用橙）
+        trans = pair(f"""TransparentPushButton {{ background: transparent; border: none;
+            border-radius: {CDST.R_LG}px; padding: 5px 10px; color: {txt2}; }}
+            TransparentPushButton:hover {{ background: {hov}; color: {txt}; }}
+            TransparentPushButton:disabled {{ color: {dis_fg}; }}""")
+        # 语义描边按钮（Push：红=标记广告 / 绿=保留）
+        def outline(fg, fill, edge):
+            return pair(f"""PushButton {{ background: transparent; border: 1px solid {edge};
+            border-radius: {CDST.R_LG}px; padding: 5px 14px; color: {fg}; }}
+            PushButton:hover {{ background: {fill}; }}
+            PushButton:pressed {{ background: {fill}; }}""")
+        # 扁平输入（CDS：无重描边，靠底色与发丝区分层级）
+        inp = pair(f"""ComboBox, SearchLineEdit {{ background: {surf3};
+            border: 1px solid {bdr}; border-radius: {CDST.R_LG}px; padding: 4px 10px; color: {txt}; }}
+            ComboBox:hover, SearchLineEdit:hover {{ border: 1px solid {gray_edge}; }}
+            ComboBox:focus, SearchLineEdit:focus {{ border: 1px solid {clay}; }}
+            ComboBox::drop-down {{ border: none; width: 24px; }}""")
+        # 中性图标按钮（无边框，hover 才出底）
+        tool = pair(f"""ToolButton {{ background: transparent; border: none;
+            border-radius: {CDST.R_LG}px; color: {txt2}; }}
+            ToolButton:hover {{ background: {hov}; color: {txt}; }}""")
+        prog = pair(f"""ProgressBar {{ background: {gray_fill}; border: none; border-radius: 3px;
+            height: 4px; min-height: 4px; max-height: 4px; }}
+            ProgressBar::chunk {{ background: {clay}; border-radius: 3px; }}""")
+
+        setCustomStyleSheet(self.btn_scan, primary, primary)
+        setCustomStyleSheet(self.btn_dispose, danger, danger)
+        for w in (self.btn_add, self.btn_cancel, self.btn_openq, self.btn_restore,
+                  self.btn_big, self.btn_log, self.btn_undo):
+            setCustomStyleSheet(w, trans, trans)
+        mk = outline(dang_fg, dang_fill, dang_edge)
+        kp = outline(ok_fg, ok_fill, ok_edge)
+        setCustomStyleSheet(self.btn_mark, mk, mk)
+        setCustomStyleSheet(self.btn_keep, kp, kp)
+        for w in (self.f_verdict, self.f_reason, self.f_search, self.f_sort):
+            setCustomStyleSheet(w, inp, inp)
+        # Segmented 自带样式（不走 PushButton 模板）
+        for w in (self.btn_cfg, self.btn_history, self.btn_export,
+                  self.btn_theme, self.btn_prev, self.btn_next):
+            setCustomStyleSheet(w, tool, tool)
+        setCustomStyleSheet(self.progress, prog, prog)
+        # 分隔发丝 / 标签 / 预览画布 / 徽标 上色
+        self._paint_chrome(d)
+
+    def _paint_chrome(self, d=None):
+        """工具条分隔线、标签、预览画布、状态胶囊、计数药丸的主题同步。"""
+        d = isDarkTheme() if d is None else d
+        TT = CDSTT
+        bdr = CDST.c(d, TT.border)
+        txt2 = CDST.c(d, TT.text_2)
+        txt3 = CDST.c(d, TT.text_3)
+        surf2 = CDST.c(d, TT.surface2)
+        for w in self.findChildren(QFrame, "vsep"):
+            w.setStyleSheet(f"background: {bdr};")
+        for name in ("lbl_disposal",):
+            w = getattr(self, name, None)
+            if w is not None:
+                w.setStyleSheet(f"color: {txt2}; background: transparent;")
+        pv = getattr(self, "preview", None)
+        if pv is not None:
+            pv.setStyleSheet(
+                f"#previewCanvas {{ background: {surf2}; border: 1px solid {bdr};"
+                f" border-radius: {CDST.R_CARD}px; color: {txt3}; }}")
+        db = getattr(self, "detail_badge", None)
+        if db is not None:
+            cur = self._current_item()
+            if cur:
+                self._paint_detail_badge(cur)
+            else:
+                db.setText("未选中")
+                db.setStyleSheet(f"#detailBadge {{ {CDST.pill_qss(d, 'gray')} }}")
+        self._paint_status_pill()
+        self._update_count_label()
 
     # ---------- 网格交互 ----------
     def eventFilter(self, obj, ev):
@@ -1842,7 +2068,7 @@ class App(FramelessWindow):
 
     def select_similar_groups(self):
         if not self.similar_groups:
-            self.status.setText("未发现相似组（或聚类尚未完成）")
+            self.set_status("未发现相似组（或聚类尚未完成）")
             return self
         n = 0
         for g in self.similar_groups:
@@ -1852,7 +2078,7 @@ class App(FramelessWindow):
         self.checked = self.model.checked
         self.grid.viewport().update()
         self._update_count_label()
-        self.status.setText(f"已勾选 {n} 张相似图（{len(self.similar_groups)} 组）")
+        self.set_status(f"已勾选 {n} 张相似图（{len(self.similar_groups)} 组）")
         return self
 
     # ---------- 弹窗 ----------
@@ -1978,7 +2204,7 @@ class App(FramelessWindow):
         """状态栏 + 操作日志面板双写。"""
         if not msg:
             return
-        self.status.setText(msg)
+        self.set_status(msg)
         if hasattr(self, "log"):
             from datetime import datetime
             self.log.append(f"[{datetime.now():%H:%M:%S}] {msg}")
@@ -2037,7 +2263,7 @@ class App(FramelessWindow):
         self.btn_scan.setEnabled(False)
         self.dot.set_state("running")
         self._log(f"开始扫描：{len(roots)} 个文件夹")
-        self.status.setText("正在收集文件…")
+        self.set_status("正在收集文件…")
         self._last_progress = 0
         self.progress.setValue(0)
         self.folder_bar.update_progress()
@@ -2053,19 +2279,19 @@ class App(FramelessWindow):
         if self.pause.is_set():
             self.pause.clear()
             self.btn_pause.setText("暂停")
-            self.status.setText("继续扫描…")
+            self.set_status("继续扫描…")
             self._log("继续扫描")
         else:
             self.pause.set()
             self.btn_pause.setText("继续")
-            self.status.setText(f"已暂停 · {getattr(self, '_last_progress', 0)}/{self.total_files} · 命中 {len(self.items)}")
+            self.set_status(f"已暂停 · {getattr(self, '_last_progress', 0)}/{self.total_files} · 命中 {len(self.items)}")
             self._log(f"暂停扫描（{getattr(self, '_last_progress', 0)}/{self.total_files}）")
         return self
 
     def cancel_scan(self):
         self.cancel.set()
         self.pause.clear()
-        self.status.setText("取消中…")
+        self.set_status("取消中…")
         return self
 
     # ---------- 轮询 ----------
@@ -2132,9 +2358,9 @@ class App(FramelessWindow):
                 self.progress.setValue(int(latest_progress * 100 / max(1, self.total_files)))
                 cached_hint = f" · 缓存 {cached_n}" if cached_n else ""
                 if self.pause.is_set():
-                    self.status.setText(f"已暂停 · {latest_progress}/{self.total_files} · 命中 {len(self.items)}")
+                    self.set_status(f"已暂停 · {latest_progress}/{self.total_files} · 命中 {len(self.items)}")
                 else:
-                    self.status.setText(f"{latest_progress}/{self.total_files}{cached_hint} · 命中 {len(self.items)}")
+                    self.set_status(f"{latest_progress}/{self.total_files}{cached_hint} · 命中 {len(self.items)}")
             if folder_updated or latest_progress is not None or current_hit:
                 self.folder_bar.update_progress()
             if cancelled:
@@ -2142,7 +2368,7 @@ class App(FramelessWindow):
                 self.btn_pause.setEnabled(False)
                 self.btn_pause.setText("暂停")
                 self.dot.set_state("ready")
-                self.status.setText("已取消")
+                self.set_status("已取消")
             elif disposed is not None:
                 mode, moved, errors, ok_paths = disposed[0], disposed[1], disposed[2], disposed[3]
                 q_root_str = disposed[4] if len(disposed) > 4 else None
@@ -2165,7 +2391,7 @@ class App(FramelessWindow):
                 self.btn_dispose.setEnabled(True)
                 self.btn_restore.setEnabled(True)
                 msg = f"处置完成：{moved} 张成功" + (f"，{len(errors)} 张失败" if errors else "")
-                self.status.setText(msg)
+                self.set_status(msg)
                 self._log("处置（" + {"quarantine": "隔离", "recycle": "回收站", "delete": "删除"}.get(mode, mode) + "）" + msg)
                 self._toast(msg, ok=not errors)
                 if errors:
@@ -2174,7 +2400,7 @@ class App(FramelessWindow):
                 restored_n, errors = restored
                 self._disposing = False
                 self.btn_restore.setEnabled(True)
-                self.status.setText(f"恢复完成：{restored_n} 张")
+                self.set_status(f"恢复完成：{restored_n} 张")
                 self._log(f"从隔离区恢复 {restored_n} 张")
                 self._toast(f"恢复完成：{restored_n} 张")
                 if errors:
@@ -2186,7 +2412,7 @@ class App(FramelessWindow):
                 self.dot.set_state("ready")
                 n_ad = sum(1 for it in self.items if it["verdict"] == "ad")
                 n_su = len(self.items) - n_ad
-                self.status.setText(f"扫描完成 · 命中 {len(self.items)}（广告 {n_ad} / 疑似 {n_su}）")
+                self.set_status(f"扫描完成 · 命中 {len(self.items)}（广告 {n_ad} / 疑似 {n_su}）")
                 self._log(f"扫描完成：命中 {len(self.items)}（广告 {n_ad} / 疑似 {n_su}）")
                 af.append_history({
                     "time": time.strftime("%F %T"),
@@ -2328,7 +2554,28 @@ class App(FramelessWindow):
         self.f_reason.blockSignals(False)
 
     def _update_count_label(self):
-        self.lbl_count.setText(f"命中 {len(self.model.items)} · 已选 {len(self.checked)}")
+        """计数药丸：命中=中性灰，已选=品牌橙（0 时降为灰），形成主次层级。"""
+        n_hit, n_sel = len(self.model.items), len(self.checked)
+        d = isDarkTheme()
+        gray_fg, gray_fill, gray_edge = CDST.sem(d, "gray")
+        self.pill_hit.setText(f"命中 {n_hit}")
+        self.pill_hit.setStyleSheet(
+            f"#countPill {{ {CDST.pill_qss(d, 'gray')} }}")
+        self.pill_sel.setText(f"已选 {n_sel}")
+        role = "clay" if n_sel else "gray"
+        self.pill_sel.setStyleSheet(
+            f"#countPill {{ {CDST.pill_qss(d, role)} }}")
+        self.lbl_count.setToolTip(f"命中 {n_hit} · 已选 {n_sel}")
+
+    def _paint_detail_badge(self, it):
+        """详情头判定徽标：语义色（红=广告 / 琥珀=疑似 / 蓝=异常 / 绿=干净）。"""
+        v = it.get("verdict", "clean")
+        role = CDST.ROLE_BY_VERDICT.get(v, "gray")
+        d = isDarkTheme()
+        self.detail_badge.setText(
+            f"{VERDICT_TEXT.get(v, v)} {it.get('score', 0):.0f}")
+        self.detail_badge.setStyleSheet(
+            f"#detailBadge {{ {CDST.pill_qss(d, role)} font-weight: 600; }}")
 
     # ---------- 相似 ----------
     def _start_similar(self):
@@ -2353,7 +2600,7 @@ class App(FramelessWindow):
         self.grid.viewport().update()
         if groups:
             n_p = sum(len(g) for g in groups)
-            self.status.setText(
+            self.set_status(
                 f"命中 {len(self.items)} 张 · 相似 {len(groups)} 组共 {n_p} 张（右键可批量勾选）")
 
     # ---------- 预览 ----------
@@ -2384,6 +2631,7 @@ class App(FramelessWindow):
         if gi is not None:
             info += f"\n相似组: {len(self.similar_groups[gi])} 张"
         self.info.setPlainText(info)
+        self._paint_detail_badge(it)
 
         tw = max(200, self.preview.width() - 6)
         th = max(120, self.preview.height() - 6)
@@ -2581,7 +2829,7 @@ class App(FramelessWindow):
         self.btn_scan.setEnabled(False)
         self.btn_dispose.setEnabled(False)
         self.btn_restore.setEnabled(False)
-        self.status.setText("处置中…")
+        self.set_status("处置中…")
 
         def work():
             self._disposing = True
@@ -3892,6 +4140,45 @@ def gui_func_test() -> int:
         app.refresh()
         pump(0.3)
         check("无结果时空状态显示", app._empty.isVisible())
+
+        # —— 色彩层级（语义色体系）——
+        import cds_tokens as _CDST
+        _dark = isDarkTheme()
+        # 1. 状态胶囊：完成 → 绿；进行中 → 品牌橙；就绪 → 灰
+        app.set_status("扫描完成 · 命中 2（广告 1 / 疑似 1）")
+        pump(0.1)
+        ok_fg, ok_fill, _ = _CDST.sem(_dark, "ok")
+        check("状态胶囊完成=绿", app._status_role == "ok" and ok_fill in app.status_pill.styleSheet())
+        app.set_status("正在收集文件…")
+        pump(0.1)
+        clay_fg, clay_fill, _ = _CDST.sem(_dark, "clay")
+        check("状态胶囊进行中=橙", app._status_role == "clay" and clay_fill in app.status_pill.styleSheet())
+        app.set_status("已取消")
+        pump(0.1)
+        check("状态胶囊取消=琥珀", app._status_role == "warn")
+        app.set_status("就绪")
+        pump(0.1)
+        check("状态胶囊就绪=灰", app._status_role == "gray")
+        # 2. 计数药丸：已选 >0 → 品牌橙，0 → 灰
+        app.checked.clear()
+        app.checked.add("some://path")
+        app._update_count_label()
+        pump(0.1)
+        check("已选药丸非零=橙", clay_fill in app.pill_sel.styleSheet())
+        app.checked.clear()
+        app._update_count_label()
+        gray_fg, gray_fill, _ = _CDST.sem(_dark, "gray")
+        check("已选药丸为零=灰", gray_fill in app.pill_sel.styleSheet(),
+              f"expect {gray_fill} got {app.pill_sel.styleSheet()[:90]}")
+        # 3. 判定色与品牌橙分离：广告徽标用红系，不再复用 clay
+        ad_fg, _, _ = _CDST.sem(_dark, "ad")
+        clay_fg2 = _CDST.c(_dark, CDSTT.clay)
+        check("广告判定色≠品牌橙", ad_fg.lower() != clay_fg2.lower(),
+              f"ad={ad_fg} clay={clay_fg2}")
+        # 4. 详情头徽标语义化
+        app._paint_detail_badge({"verdict": "ad", "score": 98})
+        pump(0.1)
+        check("详情徽标含判定文字", "广告" in app.detail_badge.text())
 
     finally:
         app.close()
