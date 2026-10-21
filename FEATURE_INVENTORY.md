@@ -1,7 +1,8 @@
 # 功能清单（GUI 重做验收基线）
 
 > 重做 GUI 时逐条对照，**一条都不能少**。括号内是现有实现位置/名称。
-> 自动化验收：`python ad_filter.py --gui-test`（105 项断言）、`python tests/test_e2e.py`、`python tests/test_accuracy.py`。
+> 自动化验收：`python ad_filter.py --gui-test`（128 项断言）、`python tests/test_e2e.py`（37 项）、
+> `python tests/test_accuracy.py`（精度 100%/0%）、`python tests/audit_ui.py`（UI 元素位置/大小/颜色 130 项，深浅 × 三布局）。
 
 ## 1. 窗口与标题栏
 - 无边框窗口 + 自绘标题栏（高 38）

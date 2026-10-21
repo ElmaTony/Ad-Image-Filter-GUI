@@ -289,6 +289,10 @@ class LayoutManager:
             except Exception:
                 pass
             bot.setStyleSheet(getattr(app, "_bot_css", ""))
+            # 悬浮模式锁定过 56 高 / 胶囊宽——切回停靠必须还原，否则宽高被锁死
+            bot.setFixedHeight(60)
+            bot.setMinimumWidth(0)
+            bot.setMaximumWidth(16777215)
             bot.show()
         else:
             # 悬浮胶囊：Composer 同款 20px 圆角 + 双环（Qt 用 border 1px + 外描边模拟）

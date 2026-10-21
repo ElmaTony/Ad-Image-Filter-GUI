@@ -1508,6 +1508,7 @@ class App(FramelessWindow):
         # 组 3：状态胶囊（语义色：橙=进行中 / 绿=完成 / 红=异常 / 灰=就绪）
         self.status_pill = QWidget(top)
         self.status_pill.setObjectName("statusPill")
+        self.status_pill.setFixedHeight(28)   # 不锁会被顶栏布局拉成 52 全行高
         spl = QHBoxLayout(self.status_pill)
         spl.setContentsMargins(10, 0, 12, 0)
         spl.setSpacing(7)
@@ -3692,6 +3693,10 @@ def gui_func_test() -> int:
                 p0 = lb.path
                 lb._nav(1)
                 check("Lightbox 切换下一张", lb.path != p0, lb.path)
+                # ←→ 方向键翻页（清单 4：方向键联动）
+                p1 = lb.path
+                lb.keyPressEvent(type("K", (), {"key": lambda self: Qt.Key_Right})())
+                check("Lightbox 方向键翻页", lb.path != p1 or app.model.rowCount() < 2, lb.path)
             lb.keyPressEvent(type("K", (), {"key": lambda self: Qt.Key_Escape})())
             pump(0.3)
             try:
@@ -3721,6 +3726,17 @@ def gui_func_test() -> int:
         app.select_similar_groups()
         check("选相似组批量勾选", len(app.model.checked) >= 2, f"n={len(app.model.checked)}")
         app.clear_sel()
+
+        # —— 卡片 tooltip 与拖拽 mime 解析（清单 4 / 2）——
+        tip = app.model.data(app.model.index(0, 0), Qt.ToolTipRole)
+        check("卡片 tooltip 有内容", bool(tip) and len(str(tip)) > 10, str(tip)[:40])
+        from PySide6.QtCore import QMimeData, QUrl
+        md = QMimeData()
+        md.setUrls([QUrl.fromLocalFile(str(scan_dir)),
+                    QUrl.fromLocalFile(str(scan_dir / "sub"))])
+        dirs = af.collect_dirs(md)
+        check("拖拽文件夹解析", len(dirs) >= 1
+              and all(Path(d).is_dir() for d in dirs), f"{dirs}")
 
         # —— 主题切换 ——
         t0_dark = isDarkTheme()
