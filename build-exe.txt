@@ -5,6 +5,9 @@ pyinstaller --noconfirm --noconsole --onefile --name 广告图过滤 ^
   --collect-all onnxruntime ^
   --collect-all qfluentwidgets ^
   --collect-all qframelesswindow ^
+  --hidden-import cds_tokens ^
+  --hidden-import cds_widgets ^
+  --hidden-import cds_layouts ^
   --exclude-module transformers ^
   --exclude-module sklearn ^
   --exclude-module scipy ^
