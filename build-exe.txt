@@ -1,6 +1,7 @@
 @echo off
 REM 构建单文件 exe（Windows，PowerShell 下请改用 ^ 换行）
 pyinstaller --noconfirm --noconsole --onefile --name 广告图过滤 ^
+  --icon assets\icon.ico ^
   --collect-all rapidocr_onnxruntime ^
   --collect-all onnxruntime ^
   --collect-all qfluentwidgets ^

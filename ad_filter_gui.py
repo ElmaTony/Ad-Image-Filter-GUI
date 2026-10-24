@@ -20,7 +20,7 @@ from cds_tokens import T as CDSTT       # 主题类属性（surface / text / bor
 
 from PySide6.QtCore import (QAbstractListModel, Property, QEvent, QModelIndex, QObject, QRect, QSize,
                             Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QImage,
+from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage,
                           QLinearGradient, QPainter, QKeySequence, QShortcut,
                            QPen, QPixmap)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFrame,
@@ -548,9 +548,11 @@ class TitleBar(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         # 品牌不走布局：布局只能左对齐，"居中"必须按窗口真实宽度算（见 _place_brand）
-        self.logo = QLabel(self)
+        self.logo = QLabel(self)                    # AD 应用图标（标题栏与系统图标同步）
         self.logo.setObjectName("titleLogo")
-        self.logo.setFixedSize(15, 15)
+        self.logo.setFixedSize(16, 16)
+        self.logo.setPixmap(app_icon_pixmap(16))
+        self.logo.setStyleSheet("background: transparent;")
         self.brand = QLabel("", self)
         self.brand.setObjectName("titleBrand")
         lay.addStretch(1)
@@ -635,12 +637,7 @@ class TitleBar(QWidget):
             "background: transparent;")
         self.brand.setText(f'<span style="color:{clay};">广告</span>图过滤')
         self._place_brand()
-        # 陶土色品牌小方块（应用标识）
-        self.logo.setStyleSheet(
-            f"background: {clay}; border-radius: 4px; color: #ffffff;"
-            ' font-family: "Microsoft YaHei UI"; font-size: 10px; font-weight: 700;')
-        self.logo.setAlignment(Qt.AlignCenter)
-        self.logo.setText("广")
+        # logo 已是 AD 应用图标（构造时 setPixmap），主题无关无需重刷
 
 
 # ================================================================ CDS 组件
@@ -1376,6 +1373,9 @@ class App(FramelessWindow):
             # 侧栏/导航项自绘样式：主题切换必须重刷（缺失时侧栏停留在旧主题色，
             # 用户报"左侧导航区域不随主题换色"的根因）
             self.lm.refresh_theme(d)
+        if hasattr(self, "_empty"):
+            # 空状态图标底同理（用户报浅色下残留黑色方块 = 深色 muted 底未重刷）
+            self._empty.refresh_theme(d)
         if hasattr(self, "status_pill"):
             # 控件自定义样式按「当前主题」生成（setCustomStyleSheet 双套参数在部分
             # 组件上不重放——见踩坑记录），所以主题切换必须整体重刷一次
@@ -3521,9 +3521,34 @@ class QuarantineDialog(MessageBoxBase):
 
 
 # ================================================================ 入口
+def app_icon_pixmap(size: int = 64) -> "QPixmap":
+    """应用图标：圆角陶土橙方底 + 白色粗体「AD」。
+    运行时 PIL 绘制（依赖已在 requirements），不读外部文件——onefile 打包
+    无需附加数据，源码/标题栏/窗口图标三处共用同一份。"""
+    from PIL import Image, ImageDraw, ImageFont
+    S = 256
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([0, 0, S - 1, S - 1], radius=56, fill=(217, 119, 87, 255))
+    for fp in ("C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf"):
+        try:
+            font = ImageFont.truetype(fp, 118)
+            break
+        except Exception:
+            font = ImageFont.load_default()
+    bbox = d.textbbox((0, 0), "AD", font=font)
+    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    d.text(((S - w) / 2 - bbox[0], (S - h) / 2 - bbox[1]), "AD",
+           font=font, fill=(255, 255, 255, 255))
+    qimg = QImage(img.tobytes("raw", "RGBA"), S, S, QImage.Format_RGBA8888)
+    return QPixmap.fromImage(qimg).scaled(
+        size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+
 def run_gui(return_app=False):
     qapp = QApplication.instance() or QApplication(sys.argv)
     setThemeColor("#c6613f")   # CDS 官方主品牌色（陶土橙深阶）
+    qapp.setWindowIcon(QIcon(app_icon_pixmap(256)))   # 任务栏/系统显示的窗口图标
     cfg = af.load_config()
     app = App(cfg)
     app._cache = af.Cache(af.CACHE_PATH)
