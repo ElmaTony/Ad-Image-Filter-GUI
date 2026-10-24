@@ -221,36 +221,24 @@ class LayoutManager:
 
     # ---------------- 主入口 ----------------
     def apply(self, mode: str):
-        if mode not in self.MODES:
-            return
+        # 用户决定只保留单一形态（原 workbench：侧栏 + 图片墙 + 详情面板）——
+        # 三种骨架与所有切换入口已删除；任何调用都落到该形态
         app = self.app
-        self.mode = mode
+        self.mode = "workbench"
         self._teardown()
         mid = getattr(app, "mid", None)
         if mid is None:
             return
 
-        if mode == "studio":
-            self.sidebar = CDSSidebar(app, app)
-            self.sidebar.setFixedWidth(T.SIDEBAR_W)
-            mid.insertWidget(0, self.sidebar)
-            app.detail.setVisible(False)
-            self._dock_bottom(True)
-
-        elif mode == "workbench":
-            self.sidebar = CDSSidebar(app, app)
-            self.sidebar.setFixedWidth(288)
-            mid.insertWidget(0, self.sidebar)
-            self.grip = _Grip(self.sidebar, T.SIDEBAR_MIN, T.SIDEBAR_MAX, T.SIDEBAR_STEP,
-                              lambda w: None, app)
-            mid.insertWidget(1, self.grip)
-            app.detail.setVisible(True)
-            app.detail.setFixedWidth(T.DETAIL_W)
-            self._dock_bottom(True)
-
-        else:  # gallery
-            app.detail.setVisible(False)
-            self._dock_bottom(False)   # 底部改悬浮胶囊
+        self.sidebar = CDSSidebar(app, app)
+        self.sidebar.setFixedWidth(288)
+        mid.insertWidget(0, self.sidebar)
+        self.grip = _Grip(self.sidebar, T.SIDEBAR_MIN, T.SIDEBAR_MAX, T.SIDEBAR_STEP,
+                          lambda w: None, app)
+        mid.insertWidget(1, self.grip)
+        app.detail.setVisible(True)
+        app.detail.setFixedWidth(T.DETAIL_W)
+        self._dock_bottom(True)
         self.refresh_theme(getattr(app, "theme", "dark") == "dark")
 
     def _teardown(self):

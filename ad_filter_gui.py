@@ -598,6 +598,25 @@ class TitleBar(QWidget):
             self._win.showMaximized()
             self.btn_max.setText("❐")
 
+    def mousePressEvent(self, e):
+        # 标题栏拖动（用户报"窗口固定死不能移动"：自绘标题栏没实现拖动逻辑，
+        # qframelesswindow 不会替我们拖）。最大化时忽略——与双击还原配合。
+        if e.button() == Qt.LeftButton:
+            self._drag_pos = e.globalPosition().toPoint() - self._win.frameGeometry().topLeft()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if (e.buttons() & Qt.LeftButton and getattr(self, "_drag_pos", None) is not None
+                and not self._win.isMaximized()):
+            self._win.move(e.globalPosition().toPoint() - self._drag_pos)
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._drag_pos = None
+        super().mouseReleaseEvent(e)
+
     def mouseDoubleClickEvent(self, e):
         self._toggle_max()
 
@@ -998,13 +1017,15 @@ class Segmented(QWidget):
                     border: 1px solid rgba(255,255,255,0.10); }
             """)
         else:
+            # 浅色：滑块纯白 + 6% 黑轨道对比不足（用户反馈"没考虑白色主题"），
+            # 轨道与滑块描边同步加深，选中态一眼可辨
             self.setStyleSheet("""
-                Segmented { background: rgba(0,0,0,0.06); border-radius: 15px; }
-                Segmented QPushButton { background: transparent; border: none; color: #525252;
+                Segmented { background: rgba(0,0,0,0.10); border-radius: 15px; }
+                Segmented QPushButton { background: transparent; border: none; color: #6b6863;
                     font-size: 12px; padding: 0 10px; }
-                Segmented QPushButton[active="true"] { color: #151515; }
+                Segmented QPushButton[active="true"] { color: #151515; font-weight: 600; }
                 #segIndicator { background: #ffffff; border-radius: 13px;
-                    border: 1px solid rgba(0,0,0,0.08); }
+                    border: 1px solid rgba(0,0,0,0.14); }
             """)
 
     def set_index(self, i, animate=True):
@@ -1522,27 +1543,12 @@ class App(FramelessWindow):
         tl.addSpacing(4)
         tl.addWidget(self._vsep(top))
         tl.addSpacing(4)
-        # 布局切换（可发现性：用户反馈找不到三布局入口——原来只有 Ctrl+1/2/3 和命令面板，
-        # 而快捷键又有焦点 bug。这里给显眼按钮 + 窗口级 QShortcut 双保险）
-        self.btn_layout = ToolButton(FIF.LAYOUT, top)
-        self.btn_layout.setToolTip("切换布局：Studio ⇄ 工作台 ⇄ 画廊（Ctrl+1/2/3）")
-        self.btn_layout.setFixedSize(32, 32)
-        self.btn_layout.clicked.connect(lambda: self.set_layout(
-            {"studio": "workbench", "workbench": "gallery", "gallery": "studio"}.get(self.layout_mode, "studio")))
-        tl.addWidget(self.btn_layout)
         self.btn_theme = TransparentToolButton(FIF.BRIGHTNESS, top)
         self.btn_theme.setToolTip("切换浅色 / 深色")
         self.btn_theme.setFixedSize(32, 32)
         self.btn_theme.clicked.connect(self.toggle_theme)
         tl.addWidget(self.btn_theme)
         root.addWidget(top)
-
-        # 窗口级快捷键（WindowShortcut：焦点在任意子控件也能触发——
-        # 原来写在 grid 的 eventFilter 里，焦点不在网格时 Ctrl+1/2/3 静默失效）
-        for key, mode in ((Qt.Key_1, "studio"), (Qt.Key_2, "workbench"), (Qt.Key_3, "gallery")):
-            sc = QShortcut(Qt.CTRL | key, self)
-            sc.setContext(Qt.WindowShortcut)
-            sc.activated.connect(lambda m=mode: self.set_layout(m))
 
         # —— 文件夹条（已导入文件夹 + 每个文件夹扫描进度）——
         self.folder_bar = FolderBar(self)
@@ -1779,11 +1785,12 @@ class App(FramelessWindow):
         self.log.setVisible(False)
         root.addWidget(self.log)
 
-        # —— 三种骨架：共用同一批控件，只重排（切换时状态零丢失）——
+        # —— 布局：用户决定只保留一种（侧栏 + 图片墙 + 详情面板，原 workbench 形态），
+        # 三种骨架与切换入口已全部移除（LayoutManager.apply 强制为该形态）——
         from cds_layouts import LayoutManager
         self.lm = LayoutManager(self)
-        self.layout_mode = self.cfg.get("ui_layout", "studio")
-        self.lm.apply(self.layout_mode)
+        self.layout_mode = "workbench"
+        self.lm.apply("workbench")
 
         # —— 空状态（claudecodeui 规范）：无结果时覆盖在图片墙上，鼠标穿透 ——
         from cds_widgets import CDSEmptyState
@@ -1877,7 +1884,7 @@ class App(FramelessWindow):
             setCustomStyleSheet(w, inp, inp)
         # Segmented 自带样式（不走 PushButton 模板）
         for w in (self.btn_cfg, self.btn_history, self.btn_export,
-                  self.btn_layout, self.btn_theme, self.btn_prev, self.btn_next):
+                  self.btn_theme, self.btn_prev, self.btn_next):
             setCustomStyleSheet(w, tool, tool)
         setCustomStyleSheet(self.progress, prog, prog)
         # 分隔发丝 / 标签 / 预览画布 / 徽标 上色
@@ -1931,10 +1938,6 @@ class App(FramelessWindow):
                 return True
             elif k == Qt.Key_Delete:
                 self.execute_disposal()
-                return True
-            elif k in (Qt.Key_1, Qt.Key_2, Qt.Key_3) and (ev.modifiers() & Qt.ControlModifier):
-                self.set_layout({Qt.Key_1: "studio", Qt.Key_2: "workbench",
-                                 Qt.Key_3: "gallery"}[k])
                 return True
             return False
         if g is not None and obj is g.viewport():
@@ -2138,9 +2141,6 @@ class App(FramelessWindow):
             ("隔离区管理…", self.restore_ui),
             ("导出 CSV 报告", self.export_report),
             ("切换浅色 / 深色", self.toggle_theme),
-            ("布局 D1 Studio（Ctrl+1）", lambda: self.set_layout("studio")),
-            ("布局 D2 工作台（Ctrl+2）", lambda: self.set_layout("workbench")),
-            ("布局 D3 画廊（Ctrl+3）", lambda: self.set_layout("gallery")),
         ]
         from cds_widgets import CDSCommandPalette
         self._palette = CDSCommandPalette.popup(self, cmds)
@@ -2692,21 +2692,12 @@ class App(FramelessWindow):
             return
         super().keyPressEvent(e)
 
-    def set_layout(self, mode: str):
-        """切换骨架：studio(D1) / workbench(D2) / gallery(D3)。"""
+    def set_layout(self, mode: str = "workbench"):
+        """布局已固定为单一形态（用户决定删除三骨架切换）。
+        保留此方法仅为 API 兼容（gui-test / audit 引用），幂等无操作。"""
         if not hasattr(self, "lm"):
             return self
-        self.layout_mode = mode
-        self.cfg["ui_layout"] = mode
-        try:
-            af.save_config(self.cfg)
-        except Exception:
-            pass
-        self.lm.apply(mode)
-        self._apply_styles()
-        label = self.lm.LABELS.get(mode, mode)
-        self._log(f"切换布局：{label}")
-        self._toast(f"布局：{label}（Ctrl+1/2/3 切换）")
+        self.lm.apply("workbench")
         return self
 
     def _sync_titlebar(self):
@@ -4128,58 +4119,40 @@ def gui_func_test() -> int:
         app.resize(w0, h0)
         pump(0.3)
 
-        # —— 三种骨架：侧栏宽度 / 详情显隐 / 底部停靠↔悬浮 / 切换状态保留 ——
-        app._toast = lambda *a, **k: None   # 切换会弹 toast，静默之
-        for m, want_sb in (("studio", 256), ("workbench", 288), ("gallery", 0)):
-            app.set_layout(m)
-            pump(0.3)
-            sb = app.lm.sidebar
-            ok = (sb is not None and sb.width() == want_sb) if want_sb else sb is None
-            check(f"布局 {m} 侧栏", ok, f"sidebar={sb.width() if sb else None}")
-        check("gallery 底部悬浮胶囊", app.lm._float_bar is not None)
-        app.set_layout("workbench")
-        pump(0.3)
-        check("workbench 详情常驻", app.detail.isVisible())
-        check("workbench 底部停靠", app.lm._float_bar is None)
-        app.set_layout("studio")
-        pump(0.3)
-        check("studio 详情隐藏", not app.detail.isVisible())
-        # 切换不丢勾选
+        # —— 单一固定布局（用户决定删除三骨架切换）：侧栏 288 + 详情常驻 + 底部停靠 ——
+        check("固定布局：侧栏存在", app.lm.sidebar is not None and app.lm.sidebar.isVisible())
+        check("固定布局：侧栏宽 288", app.lm.sidebar.width() == 288,
+              f"w={app.lm.sidebar.width() if app.lm.sidebar else None}")
+        check("固定布局：详情常驻", app.detail.isVisible() and app.detail.width() == 360,
+              f"w={app.detail.width()}")
+        check("固定布局：底部停靠", app.lm._float_bar is None)
+        check("固定布局：无布局按钮", not hasattr(app, "btn_layout"))
+        # set_layout 幂等：任意旧调用都不改变形态、勾选不丢
         app.model.checked = {"__t1__", "__t2__"}
         app.checked = app.model.checked
         n_sel = len(app.model.checked)
         for _ in range(3):
             app.set_layout("gallery"); pump(0.15); app.set_layout("studio"); pump(0.15)
-        check("切换布局勾选保留", len(app.model.checked) == n_sel,
+        check("set_layout 幂等形态不变", app.layout_mode == "workbench"
+              and app.detail.isVisible() and app.lm.sidebar.isVisible(), app.layout_mode)
+        check("重复调用勾选保留", len(app.model.checked) == n_sel,
               f"{n_sel}->{len(app.model.checked)}")
 
-        # —— 命令面板（⌘K）——
+        # —— 命令面板（⌘K）：布局命令已随骨架一起删除 ——
         app.open_palette()
         pump(0.25)
-        check("命令面板打开", app._palette is not None and app._palette.list.count() >= 15,
+        has_layout_cmd = any("布局" in app._palette.list.item(i).text()
+                             for i in range(app._palette.list.count()))
+        check("命令面板无布局命令", not has_layout_cmd)
+        check("命令面板打开", app._palette is not None and app._palette.list.count() >= 12,
               f"n={app._palette.list.count() if app._palette else 0}")
         if app._palette is not None:
-            # 过滤缩小范围 + 回车执行布局切换
-            app._palette.edit.setText("画廊")
+            app._palette.edit.setText("隔离")
             pump(0.15)
             check("命令面板过滤", 0 < app._palette.list.count() < 17,
                   f"n={app._palette.list.count()}")
-            app._palette._run_current()
-            pump(0.3)
-            check("命令面板执行生效", app.layout_mode == "gallery", app.layout_mode)
-            app.set_layout("studio")
-            pump(0.3)
-
-        # —— 布局切换入口（用户报"没办法切换"：快捷键曾有焦点 bug + 无显眼的按钮入口）——
-        check("布局按钮存在", hasattr(app, "btn_layout") and app.btn_layout.isVisible())
-        app.set_layout("gallery"); pump(0.3)
-        app.btn_layout.click(); pump(0.4)   # gallery → studio
-        check("布局循环按钮生效", app.layout_mode == "studio", app.layout_mode)
-        # 窗口级快捷键：焦点在按钮上也能切（修复前只在 grid 焦点生效）
-        app.btn_scan.setFocus(); pump(0.15)
-        QTest.keyClick(app.btn_scan, Qt.Key_2, Qt.ControlModifier); pump(0.4)
-        check("非网格焦点 Ctrl+2 切布局", app.layout_mode == "workbench", app.layout_mode)
-        app.set_layout("gallery"); pump(0.3)
+            app._palette.edit.setText("")
+            pump(0.1)
 
         # —— 空状态 ——
         app.items = []

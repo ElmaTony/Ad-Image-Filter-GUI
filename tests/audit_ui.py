@@ -77,10 +77,10 @@ def main():
         if actual != theme:
             raise RuntimeError(f"主题切换失败: 想要 {theme} 实际 {actual}")
         dark = isDarkTheme()
-        for mode in ("studio", "workbench", "gallery"):
-            app.set_layout(mode)
-            pump(0.7)
-            audit(app, theme, mode, check, shot, pump)
+        # 单一固定布局（三骨架已删除）：每主题只审 workbench 形态
+        app.set_layout("workbench")
+        pump(0.7)
+        audit(app, theme, "workbench", check, shot, pump)
         if dark:
             shot(f"audit-{theme}-extra")  # 语义色像素断言用
 
@@ -135,11 +135,10 @@ def audit(app, theme, mode, check, shot, pump):
     check(f"[{tag}] 网格单元 204x242", app.grid.gridSize() == __import__("PySide6.QtCore", fromlist=["QSize"]).QSize(204, 242),
           f"gs={app.grid.gridSize()}")
 
-    # —— 侧栏（studio/workbench）——
+    # —— 侧栏（固定 288）——
     if app.lm.sidebar is not None:
         sb = app.lm.sidebar
-        check(f"[{tag}] 侧栏宽 {'256' if mode == 'studio' else '288'}",
-              sb.width() in (256, 288), f"w={sb.width()}")
+        check(f"[{tag}] 侧栏宽 288", sb.width() == 288, f"w={sb.width()}")
         icons_ok = all(not it.ico.pixmap().isNull() and it.ico.pixmap().width() >= 16
                        for it in sb.items.values())
         check(f"[{tag}] 导航图标非空", icons_ok)
@@ -219,15 +218,15 @@ def verify_colors(OUT, check):
     def load(name):
         return np.array(Image.open(OUT / f"{name}.png").convert("RGBA"))
 
-    img = load("audit-dark-gallery")
+    img = load("audit-dark-workbench")
     H, W = img.shape[:2]
-    # 执行处置按钮：胶囊居中悬浮（y≈H-72..H-16），红色 danger #F87171 系
+    # 执行处置按钮：底部停靠条（y≈H-60..H），红色 danger 系
     region = img[H - 90:H - 10, :]
     red = ((region[:, :, 0] > 190) & (region[:, :, 1] < 160) & (region[:, :, 2] < 140)).sum()
     check("[色] 执行处置=红色实底", red > 300, f"red_px={red}")
 
-    # 已选 pill = 品牌橙（audit-dark-studio 里勾了 2 张）
-    img2 = load("audit-dark-studio")
+    # 已选 pill = 品牌橙（audit-dark-workbench 里勾了 2 张）
+    img2 = load("audit-dark-workbench")
     clay = ((abs(img2[:, :, 0].astype(int) - 217) < 40)
             & (abs(img2[:, :, 1].astype(int) - 119) < 45)
             & (abs(img2[:, :, 2].astype(int) - 87) < 45)).sum()
