@@ -118,7 +118,10 @@ class ThumbCache(QObject):
         qimg = QImage(buf, w, h, w * 3, QImage.Format_RGB888).copy()
         pm = QPixmap.fromImage(qimg)
         # 预缩放到卡片显示尺寸：委托 paint 每帧 scaled 会被滚动放大成 CPU 热点
-        pm = pm.scaled(CARD_W - 16, CARD_H - 78, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        # 缩略图预缩放：高度须与绘制框一致——卡片 opt.rect 上下各内缩 5px（见 paint 的
+        # r = opt.rect.adjusted(5,5,-5,-5)），故再减 10；否则 pix 比 img_r 高 10px，
+        # 居中后向下溢出 5px 压住文件名（用户报"图片遮挡图片名"）
+        pm = pm.scaled(CARD_W - 16, CARD_H - 10 - 86, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         with self._lock:
             self._cache[path] = pm
             while len(self._cache) > self._max:
@@ -267,12 +270,15 @@ class CardDelegate(QStyledItemDelegate):
             p.drawRoundedRect(r.adjusted(-2, -2, 2, 2), CDST.R_CARD + 2, CDST.R_CARD + 2)
             p.setPen(QPen(QColor(CDST.c(dark, CDSTT.surface1)), 1))
             p.drawRoundedRect(r.adjusted(2, 2, -2, -2), CDST.R_CARD - 2, CDST.R_CARD - 2)
-        img_r = QRect(r.left() + 8, r.top() + 8, r.width() - 16, r.height() - 78)
+        img_r = QRect(r.left() + 8, r.top() + 8, r.width() - 16, r.height() - 86)
         pix = self.thumbs.get(it["path"])
         if pix is not None and not pix.isNull():
-            # 缓存里已按卡片尺寸预缩放，直接贴（避免每帧 SmoothTransformation）
+            # 裁剪到图片区：任何尺寸误差都不允许盖到下方文件名行
+            p.save()
+            p.setClipRect(img_r)
             p.drawPixmap(img_r.left() + (img_r.width() - pix.width()) // 2,
                          img_r.top() + (img_r.height() - pix.height()) // 2, pix)
+            p.restore()
         else:
             # —— 骨架屏 + 105° 倾角扫光（CDS cds-skeleton-sweep：2.0s 线性循环）——
             p.setPen(Qt.NoPen)
