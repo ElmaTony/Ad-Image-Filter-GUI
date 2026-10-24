@@ -1046,24 +1046,28 @@ class Segmented(QWidget):
         n = len(self._btns)
         if not n or self.width() <= 0:
             return
-        self._indicator.raise_() if False else None
         w = (self.width() - 4) / n
         x = 2 + self._index * w
-        from PySide6.QtCore import QPropertyAnimation, QRectF
-        if animate and hasattr(self, "_anim"):
-            self._anim.stop()
-        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+        from PySide6.QtCore import QPropertyAnimation, QRect, QEasingCurve
+        # 停掉进行中的动画。**不能**用 DeleteWhenStopped：它会在动画结束时直接回收
+        # C++ 对象，Python 侧 self._slide 变成僵尸引用，下一次点击 stop() 立即
+        # RuntimeError——用户报"切到回收站后点不了其他两种方式"的根因。
+        slide = getattr(self, "_slide", None)
+        if slide is not None:
+            try:
+                slide.stop()
+            except RuntimeError:
+                pass
+            self._slide = None
         if animate:
-            if not hasattr(self, "_slide"):
-                self._slide = None
-            if self._slide is not None:
-                self._slide.stop()
             self._slide = QPropertyAnimation(self._indicator, b"geometry")
             self._slide.setDuration(300)   # CDS ease-snap 档
             self._slide.setEasingCurve(QEasingCurve.OutCubic)
             self._slide.setStartValue(self._indicator.geometry())
             self._slide.setEndValue(QRect(int(x), 2, int(w), self.height() - 4))
-            self._slide.start(QPropertyAnimation.DeleteWhenStopped)
+            # 结束只清引用不删对象（删对象正是上面的僵尸引用陷阱）
+            self._slide.finished.connect(lambda: setattr(self, "_slide", None))
+            self._slide.start()
         else:
             self._indicator.setGeometry(int(x), 2, int(w), self.height() - 4)
         # 按钮文字态
