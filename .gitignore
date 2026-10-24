@@ -32,3 +32,5 @@ build.log
 exe_test.log
 _icon-*
 _gen/
+/_*.png
+/_*.jpg
