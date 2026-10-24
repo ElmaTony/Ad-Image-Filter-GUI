@@ -30,3 +30,5 @@ _ref/
 _preview/
 build.log
 exe_test.log
+_icon-*
+_gen/
