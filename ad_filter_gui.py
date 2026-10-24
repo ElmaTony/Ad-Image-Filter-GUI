@@ -1457,7 +1457,11 @@ class App(FramelessWindow):
         self.cfg["ui_theme"] = self.theme
         af.save_config(self.cfg)
         self._apply_theme()
+        # 卡片徽章/选中环等 delegate 自绘内容：viewport().update() 在某些状态下
+        # 不会重绘全部可见卡片（用户报"广告/疑似徽章不换色"），doItemsLayout
+        # 强制全部 item 重排重绘，最稳
         self.grid.viewport().update()
+        self.grid.doItemsLayout()
         # 覆盖层：旧主题截图，360ms 平滑淡出（InOutCubic，双方向都柔和）
         from PySide6.QtCore import QPropertyAnimation, QEasingCurve
         overlay = QLabel(self)
