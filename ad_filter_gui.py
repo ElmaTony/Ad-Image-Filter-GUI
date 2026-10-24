@@ -1368,6 +1368,10 @@ class App(FramelessWindow):
             self._apply_log_bg()
         if hasattr(self, "seg_disposal"):
             self.seg_disposal.refresh_theme()   # 分段胶囊轨道/滑块/文字随主题重建
+        if hasattr(self, "lm"):
+            # 侧栏/导航项自绘样式：主题切换必须重刷（缺失时侧栏停留在旧主题色，
+            # 用户报"左侧导航区域不随主题换色"的根因）
+            self.lm.refresh_theme(d)
         if hasattr(self, "status_pill"):
             # 控件自定义样式按「当前主题」生成（setCustomStyleSheet 双套参数在部分
             # 组件上不重放——见踩坑记录），所以主题切换必须整体重刷一次
@@ -1916,6 +1920,8 @@ class App(FramelessWindow):
                 self._paint_detail_badge(cur)
             else:
                 db.setText("未选中")
+                db.setFixedHeight(26)
+                db.setAlignment(Qt.AlignCenter)
                 db.setStyleSheet(f"#detailBadge {{ {CDST.pill_qss(d, 'gray')} }}")
         self._paint_status_pill()
         self._update_count_label()
@@ -2575,13 +2581,18 @@ class App(FramelessWindow):
         self.f_reason.blockSignals(False)
 
     def _update_count_label(self):
-        """计数药丸：命中常驻（灰），已选只在 >0 时出现（品牌橙）——0 时不占视觉。"""
+        """计数药丸：命中常驻（灰），已选只在 >0 时出现（品牌橙）——0 时不占视觉。
+        所有语义药丸统一 26px 高（用户：命中/已选/详情徽章三个胶囊大小不一）。"""
         n_hit, n_sel = len(self.model.items), len(self.checked)
         d = isDarkTheme()
         self.pill_hit.setText(f"命中 {n_hit}")
+        self.pill_hit.setFixedHeight(26)
+        self.pill_hit.setAlignment(Qt.AlignCenter)
         self.pill_hit.setStyleSheet(
             f"#countPill {{ {CDST.pill_qss(d, 'gray')} }}")
         self.pill_sel.setText(f"已选 {n_sel}")
+        self.pill_sel.setFixedHeight(26)
+        self.pill_sel.setAlignment(Qt.AlignCenter)
         role = "clay" if n_sel else "gray"
         self.pill_sel.setStyleSheet(
             f"#countPill {{ {CDST.pill_qss(d, role)} }}")
@@ -2589,12 +2600,15 @@ class App(FramelessWindow):
         self.lbl_count.setToolTip(f"命中 {n_hit} · 已选 {n_sel}")
 
     def _paint_detail_badge(self, it):
-        """详情头判定徽标：语义色（红=广告 / 琥珀=疑似 / 蓝=异常 / 绿=干净）。"""
+        """详情头判定徽标：语义色（红=广告 / 琥珀=疑似 / 蓝=异常 / 绿=干净）。
+        与计数药丸统一 26px 高。"""
         v = it.get("verdict", "clean")
         role = CDST.ROLE_BY_VERDICT.get(v, "gray")
         d = isDarkTheme()
         self.detail_badge.setText(
             f"{VERDICT_TEXT.get(v, v)} {it.get('score', 0):.0f}")
+        self.detail_badge.setFixedHeight(26)
+        self.detail_badge.setAlignment(Qt.AlignCenter)
         self.detail_badge.setStyleSheet(
             f"#detailBadge {{ {CDST.pill_qss(d, role)} font-weight: 600; }}")
 

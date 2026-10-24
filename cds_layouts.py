@@ -104,7 +104,8 @@ class CDSNavItem(QFrame):
 
 
 class CDSSidebar(QFrame):
-    """侧栏：品牌头 + 导航 + 底部设置。宽度由布局模式决定。"""
+    """侧栏：导航 + 底部设置。宽度由布局模式决定。
+    头部 logo/品牌已删（用户：标题栏已有品牌，重复）。"""
 
     def __init__(self, app, parent=None):
         super().__init__(parent)
@@ -114,18 +115,6 @@ class CDSSidebar(QFrame):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 12, 10, 12)
         lay.setSpacing(2)
-        head = QHBoxLayout()
-        self.logo = QLabel("广", self)
-        self.logo.setFixedSize(24, 24)
-        self.logo.setAlignment(Qt.AlignCenter)
-        self.logo.setFont(_font(12, bold=True))
-        head.addWidget(self.logo)
-        self.brand = QLabel("广告图过滤", self)
-        self.brand.setFont(_font(13, bold=True))
-        head.addWidget(self.brand)
-        head.addStretch(1)
-        lay.addLayout(head)
-        lay.addSpacing(10)
         for glyph, text, key in NAV_ITEMS:
             it = CDSNavItem(glyph, text, key, self)
             it.clicked.connect(self._on_nav)
@@ -160,9 +149,6 @@ class CDSSidebar(QFrame):
         self.setStyleSheet(
             f"CDSSidebar {{ background: {T.c(dark, TT.sidebar)};"
             f" border-right: 1px solid {T.c(dark, TT.border)}; }}")
-        self.logo.setStyleSheet(
-            f"background: {T.CLAY}; color: #fff; border-radius: {T.R_MD}px;")
-        self.brand.setStyleSheet(f"color: {T.c(dark, TT.text)};")
         for it in self.items.values():
             it.refresh_theme(dark)
 
