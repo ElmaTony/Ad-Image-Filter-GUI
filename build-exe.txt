@@ -43,4 +43,9 @@ pyinstaller --noconfirm --noconsole --onefile --name 广告图过滤 ^
   --exclude-module PySide6.QtQmlModels ^
   ad_filter.py
 echo.
-echo 产物：dist\广告图过滤.exe（约 165MB，onefile 首次启动需解压 5-10 秒）
+REM 同步到项目根目录并删除 dist（避免 173MB 重复 exe 占空间——用户要求打包流程自带清理）
+copy /y dist\广告图过滤.exe .\广告图过滤.exe >nul
+rd /s /q dist
+rd /s /q build
+del /q *.spec >nul 2>nul
+echo 完成：根目录 广告图过滤.exe（约 175MB，onefile 首次启动需解压 5-10 秒）；dist/build/spec 已自动清理

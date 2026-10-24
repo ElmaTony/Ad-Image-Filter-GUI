@@ -21,7 +21,7 @@ from cds_tokens import T as CDSTT       # 主题类属性（surface / text / bor
 from PySide6.QtCore import (QAbstractListModel, Property, QEvent, QModelIndex, QObject, QRect, QSize,
                             Qt, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QImage,
-                          QLinearGradient, QPainter,
+                          QLinearGradient, QPainter, QKeySequence, QShortcut,
                            QPen, QPixmap)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFrame,
                                QHBoxLayout,
@@ -1522,12 +1522,27 @@ class App(FramelessWindow):
         tl.addSpacing(4)
         tl.addWidget(self._vsep(top))
         tl.addSpacing(4)
+        # 布局切换（可发现性：用户反馈找不到三布局入口——原来只有 Ctrl+1/2/3 和命令面板，
+        # 而快捷键又有焦点 bug。这里给显眼按钮 + 窗口级 QShortcut 双保险）
+        self.btn_layout = ToolButton(FIF.LAYOUT, top)
+        self.btn_layout.setToolTip("切换布局：Studio ⇄ 工作台 ⇄ 画廊（Ctrl+1/2/3）")
+        self.btn_layout.setFixedSize(32, 32)
+        self.btn_layout.clicked.connect(lambda: self.set_layout(
+            {"studio": "workbench", "workbench": "gallery", "gallery": "studio"}.get(self.layout_mode, "studio")))
+        tl.addWidget(self.btn_layout)
         self.btn_theme = TransparentToolButton(FIF.BRIGHTNESS, top)
         self.btn_theme.setToolTip("切换浅色 / 深色")
         self.btn_theme.setFixedSize(32, 32)
         self.btn_theme.clicked.connect(self.toggle_theme)
         tl.addWidget(self.btn_theme)
         root.addWidget(top)
+
+        # 窗口级快捷键（WindowShortcut：焦点在任意子控件也能触发——
+        # 原来写在 grid 的 eventFilter 里，焦点不在网格时 Ctrl+1/2/3 静默失效）
+        for key, mode in ((Qt.Key_1, "studio"), (Qt.Key_2, "workbench"), (Qt.Key_3, "gallery")):
+            sc = QShortcut(Qt.CTRL | key, self)
+            sc.setContext(Qt.WindowShortcut)
+            sc.activated.connect(lambda m=mode: self.set_layout(m))
 
         # —— 文件夹条（已导入文件夹 + 每个文件夹扫描进度）——
         self.folder_bar = FolderBar(self)
@@ -1862,7 +1877,7 @@ class App(FramelessWindow):
             setCustomStyleSheet(w, inp, inp)
         # Segmented 自带样式（不走 PushButton 模板）
         for w in (self.btn_cfg, self.btn_history, self.btn_export,
-                  self.btn_theme, self.btn_prev, self.btn_next):
+                  self.btn_layout, self.btn_theme, self.btn_prev, self.btn_next):
             setCustomStyleSheet(w, tool, tool)
         setCustomStyleSheet(self.progress, prog, prog)
         # 分隔发丝 / 标签 / 预览画布 / 徽标 上色
@@ -4154,6 +4169,17 @@ def gui_func_test() -> int:
             check("命令面板执行生效", app.layout_mode == "gallery", app.layout_mode)
             app.set_layout("studio")
             pump(0.3)
+
+        # —— 布局切换入口（用户报"没办法切换"：快捷键曾有焦点 bug + 无显眼的按钮入口）——
+        check("布局按钮存在", hasattr(app, "btn_layout") and app.btn_layout.isVisible())
+        app.set_layout("gallery"); pump(0.3)
+        app.btn_layout.click(); pump(0.4)   # gallery → studio
+        check("布局循环按钮生效", app.layout_mode == "studio", app.layout_mode)
+        # 窗口级快捷键：焦点在按钮上也能切（修复前只在 grid 焦点生效）
+        app.btn_scan.setFocus(); pump(0.15)
+        QTest.keyClick(app.btn_scan, Qt.Key_2, Qt.ControlModifier); pump(0.4)
+        check("非网格焦点 Ctrl+2 切布局", app.layout_mode == "workbench", app.layout_mode)
+        app.set_layout("gallery"); pump(0.3)
 
         # —— 空状态 ——
         app.items = []
