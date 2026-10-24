@@ -3522,25 +3522,33 @@ class QuarantineDialog(MessageBoxBase):
 
 # ================================================================ 入口
 def app_icon_pixmap(size: int = 64) -> "QPixmap":
-    """应用图标：圆角陶土橙方底 + 白色粗体「AD」。
-    运行时 PIL 绘制（依赖已在 requirements），不读外部文件——onefile 打包
-    无需附加数据，源码/标题栏/窗口图标三处共用同一份。"""
+    """应用图标：圆角陶土橙方底 + 白色「AD」+ 清除斜杠。
+    语义是「清理广告图」而非「广告」——斜杠是主识别符，16px 小尺寸下
+    橙底+白斜杠依然可辨。运行时 PIL 绘制（依赖已在 requirements），
+    不读外部文件——onefile 打包无需附加数据，标题栏/窗口/exe 三处共用。"""
     from PIL import Image, ImageDraw, ImageFont
-    S = 256
+    S = 512
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.rounded_rectangle([0, 0, S - 1, S - 1], radius=56, fill=(217, 119, 87, 255))
+    d.rounded_rectangle([0, 0, S - 1, S - 1], radius=int(S * 0.22),
+                        fill=(217, 119, 87, 255))
     for fp in ("C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf"):
         try:
-            font = ImageFont.truetype(fp, 118)
+            font = ImageFont.truetype(fp, int(S * 0.44))
             break
         except Exception:
             font = ImageFont.load_default()
     bbox = d.textbbox((0, 0), "AD", font=font)
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     d.text(((S - w) / 2 - bbox[0], (S - h) / 2 - bbox[1]), "AD",
-           font=font, fill=(255, 255, 255, 255))
-    qimg = QImage(img.tobytes("raw", "RGBA"), S, S, QImage.Format_RGBA8888)
+           font=font, fill=(255, 255, 255, 235))
+    pad, lw = int(S * 0.16), int(S * 0.13)   # 清除斜杠：粗圆头白线 左下→右上
+    d.line([pad, S - pad, S - pad, pad], fill=(255, 255, 255, 255), width=lw)
+    r = lw // 2
+    for cx, cy in ((pad, S - pad), (S - pad, pad)):
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(255, 255, 255, 255))
+    img = img.resize((256, 256), Image.LANCZOS)
+    qimg = QImage(img.tobytes("raw", "RGBA"), 256, 256, QImage.Format_RGBA8888)
     return QPixmap.fromImage(qimg).scaled(
         size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
