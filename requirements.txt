@@ -7,3 +7,4 @@ rapidocr-onnxruntime>=1.3
 onnxruntime>=1.16
 numpy>=1.24
 send2trash>=1.8
+pyzbar>=0.1.9  # 二维码解码（OpenCV 解不出的带 logo/低清码）
