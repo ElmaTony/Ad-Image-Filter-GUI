@@ -289,22 +289,14 @@ class CardDelegate(QStyledItemDelegate):
             g.setColorAt(0.65, QColor(0, 0, 0, 0))
             g.setColorAt(1.0, QColor(0, 0, 0, 0))
             p.fillRect(img_r, QBrush(g))
-        # 判定徽章（贴在缩略图左下）：语义色小徽标——淡底无边框，降饱和降噪
-        # （整屏 9 张卡片若每张都红边红字会视觉过载，语义色只留这一枚小徽章）
+        # 判定标记：左缘 4px 竖色条（红=广告 / 琥珀=疑似 / 蓝=异常）。
+        # 原徽章（淡底 pill+文字）在浅色主题下视觉违和且重绘链路脆弱，改竖条——
+        # 语义保留、零文字、深浅主题下都是一条克制的饱和色。
         vrole = CDST.ROLE_BY_VERDICT.get(it["verdict"], "info")
-        vc, vfill, vedge = CDST.sem(dark, vrole)
-        vc = QColor(vc)
-        score = it.get("score", 0)
-        vtext = VERDICT_TEXT.get(it["verdict"], it["verdict"])
-        blabel = f"{vtext} {score:.0f}" if score else vtext
-        bw = self._fm_badge.horizontalAdvance(blabel) + 14
-        br = QRect(img_r.left() + 8, img_r.bottom() - 26, min(bw, img_r.width() - 16), 18)
+        vc, _vfill, _vedge = CDST.sem(dark, vrole)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(vfill))
-        p.drawRoundedRect(br, CDST.R_SM, CDST.R_SM)
-        p.setPen(vc)
-        p.setFont(self._f_badge)
-        p.drawText(br, Qt.AlignCenter, blabel)
+        p.setBrush(QColor(vc))
+        p.drawRoundedRect(QRect(img_r.left(), img_r.top() + 8, 4, img_r.height() - 16), 2, 2)
         # 文件名（双向截断：扩展名永远保留）+ 右上类型徽标
         name = self._elide_bidir(Path(it["path"]).name, self._fm_name, r.width() - 20)
         p.setPen(QColor(CDST.c(dark, CDSTT.clay)) if selected
