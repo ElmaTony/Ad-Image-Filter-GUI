@@ -118,7 +118,7 @@ class ThumbCache(QObject):
         qimg = QImage(buf, w, h, w * 3, QImage.Format_RGB888).copy()
         pm = QPixmap.fromImage(qimg)
         # 预缩放到卡片显示尺寸：委托 paint 每帧 scaled 会被滚动放大成 CPU 热点
-        pm = pm.scaled(CARD_W - 16, CARD_H - 62, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pm = pm.scaled(CARD_W - 16, CARD_H - 78, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         with self._lock:
             self._cache[path] = pm
             while len(self._cache) > self._max:
@@ -267,7 +267,7 @@ class CardDelegate(QStyledItemDelegate):
             p.drawRoundedRect(r.adjusted(-2, -2, 2, 2), CDST.R_CARD + 2, CDST.R_CARD + 2)
             p.setPen(QPen(QColor(CDST.c(dark, CDSTT.surface1)), 1))
             p.drawRoundedRect(r.adjusted(2, 2, -2, -2), CDST.R_CARD - 2, CDST.R_CARD - 2)
-        img_r = QRect(r.left() + 8, r.top() + 8, r.width() - 16, r.height() - 62)
+        img_r = QRect(r.left() + 8, r.top() + 8, r.width() - 16, r.height() - 78)
         pix = self.thumbs.get(it["path"])
         if pix is not None and not pix.isNull():
             # 缓存里已按卡片尺寸预缩放，直接贴（避免每帧 SmoothTransformation）
@@ -289,38 +289,49 @@ class CardDelegate(QStyledItemDelegate):
             g.setColorAt(0.65, QColor(0, 0, 0, 0))
             g.setColorAt(1.0, QColor(0, 0, 0, 0))
             p.fillRect(img_r, QBrush(g))
-        # 判定标记：左缘 4px 竖色条（红=广告 / 琥珀=疑似 / 蓝=异常）。
-        # 原徽章（淡底 pill+文字）在浅色主题下视觉违和且重绘链路脆弱，改竖条——
-        # 语义保留、零文字、深浅主题下都是一条克制的饱和色。
+        # 判定语义色（标签行用：淡语义底 + 饱和语义字）
         vrole = CDST.ROLE_BY_VERDICT.get(it["verdict"], "info")
         vc, _vfill, _vedge = CDST.sem(dark, vrole)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(vc))
-        p.drawRoundedRect(QRect(img_r.left(), img_r.top() + 8, 4, img_r.height() - 16), 2, 2)
-        # 文件名（双向截断：扩展名永远保留）+ 右上类型徽标
+        # 文件名（双向截断：扩展名永远保留）——单独一行
         name = self._elide_bidir(Path(it["path"]).name, self._fm_name, r.width() - 20)
         p.setPen(QColor(CDST.c(dark, CDSTT.clay)) if selected
                  else QColor(CDST.c(dark, CDSTT.text)))
         p.setFont(self._f_name)
-        p.drawText(QRect(r.left() + 10, r.bottom() - 50, r.width() - 20, 16),
+        p.drawText(QRect(r.left() + 10, r.bottom() - 74, r.width() - 20, 16),
                    Qt.AlignLeft | Qt.AlignVCenter, name)
+        # 标签行：左判定右格式，同一行、同款底座。
+        # 判定信息重设计：语义色只落在 5px 圆点上，文字走中性灰——
+        # 浅色下不出现任何深色重块，一眼扫色点即知类型（红=广告/琥珀=疑似/蓝=异常）
+        vtext = VERDICT_TEXT.get(it["verdict"], it["verdict"])
+        tw = self._fm_badge.horizontalAdvance(vtext)
+        vbw = tw + 24                       # 圆点 + 间距 + 文字 + 左右 padding
+        vbr = QRect(r.left() + 10, r.bottom() - 55, vbw, 15)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(CDST.c(dark, CDSTT.muted)))
+        p.drawRoundedRect(vbr, CDST.R_SM, CDST.R_SM)
+        p.setBrush(QColor(vc))
+        p.drawEllipse(QRect(vbr.left() + 6, vbr.top() + 5, 5, 5))
+        p.setPen(QColor(CDST.c(dark, CDSTT.text_2)))
+        p.setFont(self._f_badge)
+        p.drawText(QRect(vbr.left() + 15, vbr.top(), tw + 4, vbr.height()),
+                   Qt.AlignLeft | Qt.AlignVCenter, vtext)
         ext = Path(it["path"]).suffix.lstrip(".").upper()
         if ext:
             btxt = self._fm_badge.elidedText(ext, Qt.ElideRight, 34)
             bw = self._fm_badge.horizontalAdvance(btxt) + 10
-            br = QRect(r.right() - bw - 8, r.bottom() - 49, bw, 15)
+            br = QRect(r.right() - bw - 8, r.bottom() - 55, bw, 15)
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(CDST.c(dark, CDSTT.muted)))
             p.drawRoundedRect(br, CDST.R_SM, CDST.R_SM)
             p.setPen(QColor(CDST.c(dark, CDSTT.text_3)))
             p.setFont(self._f_badge)
             p.drawText(br, Qt.AlignCenter, btxt)
-        # 命中原因：中性灰（不再整屏红字；语义色只保留在判定徽章上）
+        # 命中原因：中性灰（不再整屏红字；语义色只保留在判定标签上）
         reason = self._fm_reason.elidedText("; ".join(h.get("label", "") for h in it["reasons"]),
                                             Qt.ElideRight, r.width() - 20)
         p.setPen(QColor(CDST.c(dark, CDSTT.text_2)))
         p.setFont(self._f_reason)
-        p.drawText(QRect(r.left() + 10, r.bottom() - 32, r.width() - 20, 13),
+        p.drawText(QRect(r.left() + 10, r.bottom() - 37, r.width() - 20, 13),
                    Qt.AlignLeft | Qt.AlignVCenter, reason)
         # 来源文件夹行（📁 根文件夹名/子目录）
         folder = it.get("_folder") or ""
@@ -331,10 +342,10 @@ class CardDelegate(QStyledItemDelegate):
             # 自绘文件夹小图标（不用 emoji——部分字体缺字形会显示成方块）
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(CDST.c(dark, CDSTT.text_3)))
-            p.drawRoundedRect(QRect(r.left() + 10, r.bottom() - 15, 11, 8), 2, 2)
-            p.drawRoundedRect(QRect(r.left() + 10, r.bottom() - 18, 5, 3), 1, 1)
+            p.drawRoundedRect(QRect(r.left() + 10, r.bottom() - 18, 11, 8), 2, 2)
+            p.drawRoundedRect(QRect(r.left() + 10, r.bottom() - 21, 5, 3), 1, 1)
             p.setPen(QColor(CDST.c(dark, CDSTT.text_2)))
-            p.drawText(QRect(r.left() + 25, r.bottom() - 18, r.width() - 35, 14),
+            p.drawText(QRect(r.left() + 25, r.bottom() - 21, r.width() - 35, 14),
                        Qt.AlignLeft | Qt.AlignVCenter, ftext)
         cr = QRect(r.left() + 8, r.top() + 8, 22, 22)
         checked = it["path"] in self.model.checked
