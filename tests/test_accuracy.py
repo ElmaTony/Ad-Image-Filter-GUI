@@ -4,7 +4,7 @@ import sys, tempfile, shutil, random
 from pathlib import Path
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-sys.path.insert(0, r"C:/Users/50653/.zcode/workspace/default/ad-filter-gui")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 项目根（相对自身定位，不含机器路径）
 import ad_filter as af
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 import numpy as np

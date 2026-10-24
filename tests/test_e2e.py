@@ -4,7 +4,7 @@ import json, shutil, sys, tempfile, time
 from pathlib import Path
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-sys.path.insert(0, r"C:/Users/50653/.zcode/workspace/default/ad-filter-gui")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 项目根（相对自身定位，不含机器路径）
 import ad_filter as af
 import ad_filter_gui
 tmp = Path(tempfile.mkdtemp(prefix="ad_e2e_"))
@@ -31,11 +31,15 @@ def ck(name, ok, detail=""):
 
 src = af.APP_DIR/"testdata"
 A = tmp/"相册A"; B = tmp/"相册B"; A.mkdir(); B.mkdir()
+# 真实样本按前缀动态匹配（testdata 不入库；不在代码里写死样本名）
+real_qr = next(iter(sorted(src.glob("real4_*"))), None)      # 二维码拼图类
+real_strip = next(iter(sorted(src.glob("real6_*"))), None)   # 横条贴图类
+assert real_qr and real_strip, "testdata 缺少真实样本（real4_*/real6_*）"
 for k in range(5):
-    shutil.copy(src/"real4_拼图R18CG.jpg", A/f"广告_{k}.jpg")
+    shutil.copy(real_qr, A/f"广告_{k}.jpg")
 for k in range(3):
     shutil.copy(src/"normal_01.jpg", B/f"正常_{k}.jpg")
-shutil.copy(src/"real6_横条仅在.png", A/"长条.png")
+shutil.copy(real_strip, A/"长条.png")
 
 # ① 启动空状态
 ck("启动时文件夹为空", len(app.get_roots()) == 0)

@@ -365,7 +365,7 @@ def detect_qr(img: Image.Image) -> tuple[list[str], bool]:
 
 
 def decode_qr_texts(img: Image.Image) -> list[str]:
-    """pyzbar 主解码通道：实测对 OpenCV 解不出的真实二维码（带 logo 的 R18CG 贴片）
+    """pyzbar 主解码通道：实测对 OpenCV 解不出的真实二维码（带 logo 的低清贴片）
     也能解出 t.me 链接，且仅 10~20ms/张，不比 OpenCV 慢。
     pyzbar 未安装或解码失败时返回 []（调用方回退 OpenCV 行为）。"""
     try:
