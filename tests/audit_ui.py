@@ -135,15 +135,8 @@ def audit(app, theme, mode, check, shot, pump):
     check(f"[{tag}] 网格单元 204x242", app.grid.gridSize() == __import__("PySide6.QtCore", fromlist=["QSize"]).QSize(204, 242),
           f"gs={app.grid.gridSize()}")
 
-    # —— 侧栏（固定 288）——
-    if app.lm.sidebar is not None:
-        sb = app.lm.sidebar
-        check(f"[{tag}] 侧栏宽 288", sb.width() == 288, f"w={sb.width()}")
-        icons_ok = all(not it.ico.pixmap().isNull() and it.ico.pixmap().width() >= 16
-                       for it in sb.items.values())
-        check(f"[{tag}] 导航图标非空", icons_ok)
-        badge_h = {it.badge.height() for it in sb.items.values()}
-        check(f"[{tag}] badge 高 18 且隐藏或 18", badge_h <= {18}, badge_h)
+    # —— 侧栏已删（导航与顶栏/底栏重复）：必须不存在 ——
+    check(f"[{tag}] 无侧栏", app.lm.sidebar is None)
 
     # —— 底部条 ——
     bot = app.bot

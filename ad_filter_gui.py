@@ -4137,10 +4137,8 @@ def gui_func_test() -> int:
         app.resize(w0, h0)
         pump(0.3)
 
-        # —— 单一固定布局（用户决定删除三骨架切换）：侧栏 288 + 详情常驻 + 底部停靠 ——
-        check("固定布局：侧栏存在", app.lm.sidebar is not None and app.lm.sidebar.isVisible())
-        check("固定布局：侧栏宽 288", app.lm.sidebar.width() == 288,
-              f"w={app.lm.sidebar.width() if app.lm.sidebar else None}")
+        # —— 单一固定布局：无侧栏（导航与顶栏/底栏重复，用户决定删除），详情常驻 + 底部停靠 ——
+        check("固定布局：无侧栏", app.lm.sidebar is None)
         check("固定布局：详情常驻", app.detail.isVisible() and app.detail.width() == 360,
               f"w={app.detail.width()}")
         check("固定布局：底部停靠", app.lm._float_bar is None)
@@ -4152,7 +4150,7 @@ def gui_func_test() -> int:
         for _ in range(3):
             app.set_layout("gallery"); pump(0.15); app.set_layout("studio"); pump(0.15)
         check("set_layout 幂等形态不变", app.layout_mode == "workbench"
-              and app.detail.isVisible() and app.lm.sidebar.isVisible(), app.layout_mode)
+              and app.detail.isVisible() and app.lm.sidebar is None, app.layout_mode)
         check("重复调用勾选保留", len(app.model.checked) == n_sel,
               f"{n_sel}->{len(app.model.checked)}")
 
