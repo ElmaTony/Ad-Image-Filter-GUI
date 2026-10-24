@@ -28,3 +28,5 @@ DEVLOG.md
 # ---- 研究参考 / 布局预览（本地，不入库）----
 _ref/
 _preview/
+build.log
+exe_test.log
