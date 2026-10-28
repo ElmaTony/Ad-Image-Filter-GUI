@@ -1661,8 +1661,16 @@ class App(FramelessWindow):
         self.grid.setItemDelegate(self.delegate)
         self.grid.setFrameShape(QListView.NoFrame)
         self.grid.setStyleSheet("QListView { background: transparent; }")
-        # 框选矩形颜色 = QPalette.Highlight（QStyle 绘制，QSS 管不到）。默认深蓝
-        # #024163 实心块在暖色界面上极违和——改为品牌橙低透明度（用户报"框选色太深"）
+        # 框选矩形：**自绘 overlay**。原生 setSelectionRectVisible 由 qfluentwidgets 的
+        # windows11 style 绘制，不认 QPalette.Highlight（改调色板后仍是深色实心块），
+        # QSS 也管不到——唯一可控方案是自己画（用户报"框选色太深"）
+        self.grid.setSelectionRectVisible(False)
+        self._band_start = None
+        self._sel_band = QWidget(self.grid.viewport())
+        self._sel_band.setObjectName("selBand")
+        self._sel_band.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._sel_band.setAttribute(Qt.WA_StyledBackground, True)
+        self._sel_band.hide()
         self._apply_selection_palette()
         self.grid.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.grid.selectionModel().currentChanged.connect(self._on_current_changed)
@@ -1952,6 +1960,23 @@ class App(FramelessWindow):
     # ---------- 网格交互 ----------
     def eventFilter(self, obj, ev):
         g = getattr(self, "grid", None)
+        # —— 自绘框选矩形：跟踪 viewport 上的左键拖拽，驱动 _sel_band overlay ——
+        if g is not None and obj is g.viewport() and getattr(self, "_sel_band", None) is not None:
+            t = ev.type()
+            if t == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
+                self._band_start = ev.position().toPoint()
+                self._sel_band.hide()
+            elif t == QEvent.MouseMove and self._band_start is not None and (ev.buttons() & Qt.LeftButton):
+                cur = ev.position().toPoint()
+                r = QRect(self._band_start, cur).normalized()
+                if r.width() >= 4 or r.height() >= 4:
+                    self._sel_band.setGeometry(r)
+                    self._sel_band.show()
+                    self._sel_band.raise_()
+            elif t in (QEvent.MouseButtonRelease, QEvent.Leave):
+                self._band_start = None
+                if self._sel_band is not None:
+                    self._sel_band.hide()
         if g is not None and obj is g and ev.type() == QEvent.KeyPress:
             k = ev.key()
             if k == Qt.Key_Space:
@@ -2747,9 +2772,8 @@ class App(FramelessWindow):
         super().keyPressEvent(e)
 
     def _apply_selection_palette(self):
-        """框选/原生选中底色 = 品牌橙低透明度。
-        QStyle 用 QPalette.Highlight 绘制框选矩形（QSS 管不到），默认深蓝
-        #024163 完全不透明，在暖色界面上极违和（用户报"框选色太深"）。"""
+        """选中相关配色：①原生 item 选中底走 QPalette.Highlight（品牌橙，替代深蓝）；
+        ②框选矩形是自绘 overlay（原生绘制不认 palette），此处同步刷新它的样式。"""
         if not hasattr(self, "grid"):
             return
         dark = isDarkTheme()
@@ -2757,6 +2781,13 @@ class App(FramelessWindow):
         pal.setColor(QPalette.Highlight, QColor(217, 119, 87, 56 if not dark else 64))
         pal.setColor(QPalette.HighlightedText, QColor(CDST.c(dark, CDSTT.text)))
         self.grid.setPalette(pal)
+        band = getattr(self, "_sel_band", None)
+        if band is not None:
+            fill = "rgba(217,119,87,0.10)" if not dark else "rgba(217,119,87,0.14)"
+            edge = "rgba(198,97,63,0.55)" if not dark else "rgba(224,130,100,0.60)"
+            band.setStyleSheet(
+                f"#selBand {{ background: {fill};"
+                f" border: 1.5px solid {edge}; border-radius: 6px; }}")
         self.grid.viewport().update()
 
     def set_layout(self, mode: str = "workbench"):
@@ -4226,6 +4257,11 @@ def gui_func_test() -> int:
         check("命令面板无布局命令", not has_layout_cmd)
         # 右键菜单：打开源文件文件夹（用户需求）——方法存在且能正确解析路径
         check("右键打开源文件文件夹入口", hasattr(app, "open_item_folder"))
+        # 框选矩形自绘：原生绘制不认 palette（windows11 style 画深色块）
+        check("框选矩形为自绘 overlay", app._sel_band is not None
+              and not app.grid.isSelectionRectVisible())
+        check("框选 overlay 配色为品牌橙", "217,119,87" in app._sel_band.styleSheet(),
+              app._sel_band.styleSheet()[:50])
         if app.model.items:
             import pathlib as _pl
             _folder = _pl.Path(app.model.items[0]["path"]).parent
