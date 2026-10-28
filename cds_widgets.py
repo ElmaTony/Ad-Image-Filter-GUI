@@ -328,17 +328,16 @@ class CDSProgress(QWidget):
 
 # ============================================================ 空状态（B：48 图标底 + 标题 + 描述）
 class CDSEmptyState(QWidget):
-    def __init__(self, glyph="◍", title="", desc="", parent=None):
+    def __init__(self, glyph="", title="", desc="", parent=None):
         super().__init__(parent)
         self.dark = True
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 32, 24, 32)
-        lay.setSpacing(8)
-        self.badge = QLabel(glyph, self)
-        self.badge.setFixedSize(48, 48)
-        self.badge.setAlignment(Qt.AlignCenter)
-        self.badge.setFont(_font(20))
-        lay.addWidget(self.badge, 0, Qt.AlignHCenter)
+        lay.setSpacing(6)
+        # **不再显示字符图标**：◍ 之类的符号在 Windows 字体下会渲染成怪异的网格球/
+        # 实心方块，长期被误认为"消不掉的黑色方块 bug"。空状态只保留文字，干净无歧义。
+        self.badge = QLabel("", self)
+        self.badge.setVisible(False)
         self.title = QLabel(title, self)
         self.title.setAlignment(Qt.AlignCenter)
         self.title.setFont(_font(13, bold=True))
@@ -352,9 +351,6 @@ class CDSEmptyState(QWidget):
 
     def refresh_theme(self, dark: bool):
         self.dark = dark
-        self.badge.setStyleSheet(
-            f"background: {T.c(dark, TT.muted)}; border-radius: {T.R_LG}px;"
-            f" color: {T.c(dark, TT.text_2)};")
         self.title.setStyleSheet(f"color: {T.c(dark, TT.text)};")
         self.desc.setStyleSheet(f"color: {T.c(dark, TT.text_2)};")
 
