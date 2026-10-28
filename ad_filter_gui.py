@@ -915,6 +915,11 @@ class Lightbox(QWidget):
 
     def mouseDoubleClickEvent(self, e):
         pos = e.position()
+        x = pos.x()
+        # 箭头热区（左 48px / 右 48px）里连续点击是"快速翻页"，**绝不能当双击缩放**——
+        # 翻页已由 mouseReleaseEvent 处理，这里直接吞掉（用户报"连点下一张会放大图"）
+        if x < 48 or x > self.width() - 48:
+            return
         cx, cy = self.width() / 2, self.height() / 2
         ox, oy = pos.x() - cx, pos.y() - cy
         if self.scale > 1.0:
