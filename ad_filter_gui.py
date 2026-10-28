@@ -8,6 +8,7 @@
 import json
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -840,13 +841,14 @@ class Lightbox(QWidget):
             p.setPen(QColor("#f5f5f5"))
             p.setFont(QFont("Microsoft YaHei UI", 9))
             p.drawText(pill, Qt.AlignCenter, txt)
-        # 左右箭头
+        # 左右箭头（‹ 上一张 / › 下一张）：尖点朝外——原实现尖点朝内，视觉上左右反了
         p.setPen(QPen(QColor(255, 255, 255, 140), 2))
         p.setBrush(Qt.NoBrush)
         mid_y = self.height() // 2
         for x, d in ((24, -1), (self.width() - 24, 1)):
-            p.drawLine(x + (0 if d < 0 else 8), mid_y - 9, x + (8 if d < 0 else 0), mid_y)
-            p.drawLine(x + (0 if d < 0 else 8), mid_y + 9, x + (8 if d < 0 else 0), mid_y)
+            tail = x + (8 if d < 0 else -8)   # 左侧尾在右、右侧尾在左
+            p.drawLine(tail, mid_y - 9, x, mid_y)
+            p.drawLine(tail, mid_y + 9, x, mid_y)
 
     def wheelEvent(self, e):
         import math
@@ -2059,12 +2061,29 @@ class App(FramelessWindow):
         if idx.isValid():
             menu.addAction("勾选 / 取消勾选", lambda: self.toggle_check(idx.row()))
             menu.addAction("打开大图", self.open_big)
+            menu.addAction("打开源文件文件夹", lambda: self.open_item_folder(idx.row()))
             menu.addSeparator()
         menu.addAction("全选", self.select_all)
         menu.addAction("反选", self.invert_sel)
         menu.addAction("清除选择", self.clear_sel)
         menu.addAction("选相似组", self.select_similar_groups)
         menu.exec(self.grid.viewport().mapToGlobal(pos))
+
+    def open_item_folder(self, row: int):
+        """在资源管理器中定位该图片（右键菜单入口）。"""
+        if not (0 <= row < len(self.model.items)):
+            return self
+        path = self.model.items[row]["path"]
+        folder = str(Path(path).parent)
+        try:
+            # explorer /select 高亮目标文件；文件已不在（被处置）则退化为打开目录
+            if Path(path).exists():
+                subprocess.Popen(["explorer", "/select,", str(Path(path))])
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+        except Exception as e:
+            self._info("提示", f"无法打开文件夹：{e}")
+        return self
 
     def select_all(self):
         """全选 / 再按一次取消全选（toggle）。"""
@@ -4188,6 +4207,12 @@ def gui_func_test() -> int:
         has_layout_cmd = any("布局" in app._palette.list.item(i).text()
                              for i in range(app._palette.list.count()))
         check("命令面板无布局命令", not has_layout_cmd)
+        # 右键菜单：打开源文件文件夹（用户需求）——方法存在且能正确解析路径
+        check("右键打开源文件文件夹入口", hasattr(app, "open_item_folder"))
+        if app.model.items:
+            import pathlib as _pl
+            _folder = _pl.Path(app.model.items[0]["path"]).parent
+            check("源文件夹路径可解析", _folder.is_dir(), str(_folder)[:40])
         check("命令面板打开", app._palette is not None and app._palette.list.count() >= 12,
               f"n={app._palette.list.count() if app._palette else 0}")
         if app._palette is not None:

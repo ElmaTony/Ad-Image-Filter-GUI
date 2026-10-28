@@ -69,7 +69,7 @@ DEFAULT_CONFIG = {
         {"pattern": r"频道", "weight": 1, "label": "弱词"},  # “免费/发布”实测在正常图高频误伤，只留“频道”
     ],
     "whitelist_rules": [],
-    "shape": {"max_ratio": 3.0, "min_side": 300},
+    "shape": {"max_ratio": 3.0, "max_ratio_hard": 8.0, "min_side": 300},
     "qr": {"enabled": True},
     "ocr": {
         "enabled": False,
@@ -454,8 +454,12 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
             with Image.open(path) as im:
                 w, h = im.size
             ratio = max(w, h) / max(1, min(w, h))
-            if ratio >= cfg["shape"]["max_ratio"] or ratio <= 1 / cfg["shape"]["max_ratio"]:
-                reasons.append({"type": "shape", "label": f"极端长宽比 {w}x{h}（{ratio:.1f}:1）"})
+            # 横条铁证门槛单独设（默认 8:1）：真实推广横条实测都在 8.8:1 以上
+            # （740x84 起），而 3~8:1 是拼图/长图/多图拼接的高发区——曾把 1920x544
+            # 的七图拼排误判成广告。该区间不靠形状定案，交给 QR/OCR 按内容判断。
+            ratio_hard = float(cfg["shape"].get("max_ratio_hard", 8.0))
+            if w >= h and ratio >= ratio_hard:
+                reasons.append({"type": "shape", "label": f"极端横条 {w}x{h}（{ratio:.1f}:1）"})
                 verdict, score = "ad", 90
             elif min(w, h) < cfg["shape"]["min_side"]:
                 reasons.append({"type": "shape", "label": f"分辨率过小 {w}x{h}"})
