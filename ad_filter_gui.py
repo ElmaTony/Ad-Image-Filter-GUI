@@ -242,20 +242,25 @@ class CardDelegate(QStyledItemDelegate):
         from PySide6.QtWidgets import QStyle
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)
         hovered = bool(opt.state & QStyle.StateFlag.State_MouseOver)
-        # hover：抬升 -1.5px（CDS CARD_HOVER_LIFT）+ 三层递减手绘阴影
-        # （delegate 自绘无法用 QGraphicsDropShadowEffect，只能多层叠加模拟）
+        # hover：抬升 -1.5px（CDS CARD_HOVER_LIFT）+ 下缘投影
+        # 原实现三层黑色圆角矩形**覆盖整个卡片区域**，靠不透明卡面盖住；一旦卡片
+        # 半透明（选中态 clay_fill 6%）黑底就透出来——用户报"选中还是黑色"的根因。
+        # 现在投影只画在卡片下缘之外的窄条，永不进入卡面。
         if hovered:
-            for dy, al in ((6, 30 if dark else 18), (4, 38 if dark else 22), (2, 46 if dark else 28)):
+            for dy, al in ((7, 26 if dark else 16), (4, 34 if dark else 22)):
                 p.setPen(Qt.NoPen)
                 p.setBrush(QColor(0, 0, 0, al))
-                p.drawRoundedRect(QRect(r.left() + 1, r.top() + dy, r.width() - 2, r.height()),
-                                  CDST.R_CARD, CDST.R_CARD)
+                p.drawRoundedRect(QRect(r.left() + 4, r.bottom() - 3 + dy,
+                                        r.width() - 8, 9), 6, 6)
             p.translate(0, CDST.CARD_HOVER_LIFT)
-        # 卡面：选中 = clay 低饱和填充（克制，不刺眼）；否则 surface2
+        # 卡面：**必须先铺不透明底**（选中/非选中相同），选中再叠一层淡 clay wash——
+        # 这样任何下层内容（投影/视口底色）都不会从半透明填充里透出来
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(CDST.c(dark, CDSTT.clay_fill) if selected
-                          else CDST.c(dark, CDSTT.surface2)))
+        p.setBrush(QColor(CDST.c(dark, CDSTT.surface2)))
         p.drawRoundedRect(r, CDST.R_CARD, CDST.R_CARD)
+        if selected:
+            p.setBrush(QColor(CDST.c(dark, CDSTT.clay_fill)))
+            p.drawRoundedRect(r, CDST.R_CARD, CDST.R_CARD)
         # 单闭合边框原则：只有卡片这一层闭合框
         p.setBrush(Qt.NoBrush)
         if selected:
@@ -928,12 +933,16 @@ class Lightbox(QWidget):
         if not items:
             return False
         # 切换图片时轻量重放入场（80ms 快速淡入）
-        try:
-            idx = next(i for i, x in enumerate(items) if x["path"] == self.path)
-        except StopIteration:
+        idx = next((i for i, x in enumerate(items) if x["path"] == self.path), None)
+        if idx is None:
             # 当前图已被移出列表（如刚点"保留"）：从锚点附近继续
             return self._nav_nearest()
-        idx = max(0, min(len(items) - 1, idx + delta))
+        new_idx = idx + delta
+        if new_idx < 0 or new_idx >= len(items):
+            # 已在首/末张：**不重载、不重放入场动画**（原来 clamp 后会重新
+            # _load 同一张 + 播入场 → 用户报"最后一张后画面跳动/重复加载"）
+            return False
+        idx = new_idx
         self.app.grid.setCurrentIndex(self.app.model.index(idx, 0))
         self._load(items[idx]["path"])
         self._play_enter()
@@ -1974,6 +1983,22 @@ class App(FramelessWindow):
                     self._sel_band.show()
                     self._sel_band.raise_()
             elif t in (QEvent.MouseButtonRelease, QEvent.Leave):
+                # 框选（无论几张，含单张）结束后统一勾选命中项——原逻辑走
+                # selectionChanged 且要求 ≥2 张，单张框选只选中不勾选（用户报告）
+                if (t == QEvent.MouseButtonRelease and self._sel_band is not None
+                        and self._sel_band.isVisible()):
+                    changed = False
+                    for ix in g.selectionModel().selectedIndexes():
+                        r = ix.row()
+                        if 0 <= r < len(self.model.items):
+                            p = self.model.items[r]["path"]
+                            if p not in self.model.checked:
+                                self.model.checked.add(p)
+                                changed = True
+                    if changed:
+                        self.checked = self.model.checked
+                        self._update_count_label()
+                        g.viewport().update()
                 self._band_start = None
                 if self._sel_band is not None:
                     self._sel_band.hide()
