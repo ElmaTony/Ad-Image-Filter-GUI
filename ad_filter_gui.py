@@ -8,6 +8,7 @@
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -278,25 +279,25 @@ class CardDelegate(QStyledItemDelegate):
         # 卡面：**必须先铺不透明底**（选中/非选中相同），选中再叠一层淡 clay wash——
         # 这样任何下层内容（投影/视口底色）都不会从半透明填充里透出来
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(CDST.c(dark, CDSTT.surface2)))
+        p.setBrush(_qc(CDST.c(dark, CDSTT.surface2)))
         p.drawRoundedRect(r, CDST.R_CARD, CDST.R_CARD)
         if selected:
-            p.setBrush(QColor(CDST.c(dark, CDSTT.clay_fill)))
+            p.setBrush(_qc(CDST.c(dark, CDSTT.clay_fill)))
             p.drawRoundedRect(r, CDST.R_CARD, CDST.R_CARD)
         # 单闭合边框原则：只有卡片这一层闭合框
         p.setBrush(Qt.NoBrush)
         if selected:
-            p.setPen(QPen(QColor(CDST.c(dark, CDSTT.border_clay)), 1.5))
+            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.border_clay)), 1.5))
         elif hovered:
-            p.setPen(QPen(QColor(CDST.c(dark, CDSTT.border_strong)), 1))
+            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.border_strong)), 1))
         else:
-            p.setPen(QPen(QColor(CDST.c(dark, CDSTT.border)), 1))
+            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.border)), 1))
         p.drawRoundedRect(r, CDST.R_CARD, CDST.R_CARD)
         if selected:
             # 双环聚焦协议：外环 clay + 内环 surface1
-            p.setPen(QPen(QColor(CDST.CLAY), 1.5))
+            p.setPen(QPen(_qc(CDST.CLAY), 1.5))
             p.drawRoundedRect(r.adjusted(-2, -2, 2, 2), CDST.R_CARD + 2, CDST.R_CARD + 2)
-            p.setPen(QPen(QColor(CDST.c(dark, CDSTT.surface1)), 1))
+            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.surface1)), 1))
             p.drawRoundedRect(r.adjusted(2, 2, -2, -2), CDST.R_CARD - 2, CDST.R_CARD - 2)
         img_r = QRect(r.left() + 8, r.top() + 8, r.width() - 16, r.height() - 86)
         pix = self.thumbs.get(it["path"])
@@ -310,7 +311,7 @@ class CardDelegate(QStyledItemDelegate):
         else:
             # —— 骨架屏 + 105° 倾角扫光（CDS cds-skeleton-sweep：2.0s 线性循环）——
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(CDST.c(dark, CDSTT.surface3)))
+            p.setBrush(_qc(CDST.c(dark, CDSTT.surface3)))
             p.drawRoundedRect(img_r, CDST.R_LG, CDST.R_LG)
             t = (time.time() % 2.0) / 2.0
             w = img_r.width()
@@ -328,8 +329,8 @@ class CardDelegate(QStyledItemDelegate):
         vc, _vfill, _vedge = CDST.sem(dark, vrole)
         # 文件名（双向截断：扩展名永远保留）——单独一行
         name = self._elide_bidir(Path(it["path"]).name, self._fm_name, r.width() - 20)
-        p.setPen(QColor(CDST.c(dark, CDSTT.clay)) if selected
-                 else QColor(CDST.c(dark, CDSTT.text)))
+        p.setPen(_qc(CDST.c(dark, CDSTT.clay)) if selected
+                 else _qc(CDST.c(dark, CDSTT.text)))
         p.setFont(self._f_name)
         p.drawText(QRect(r.left() + 10, r.bottom() - 74, r.width() - 20, 16),
                    Qt.AlignLeft | Qt.AlignVCenter, name)
@@ -341,11 +342,11 @@ class CardDelegate(QStyledItemDelegate):
         vbw = tw + 24                       # 圆点 + 间距 + 文字 + 左右 padding
         vbr = QRect(r.left() + 10, r.bottom() - 55, vbw, 15)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(CDST.c(dark, CDSTT.muted)))
+        p.setBrush(_qc(CDST.c(dark, CDSTT.muted)))
         p.drawRoundedRect(vbr, CDST.R_SM, CDST.R_SM)
         p.setBrush(QColor(vc))
         p.drawEllipse(QRect(vbr.left() + 6, vbr.top() + 5, 5, 5))
-        p.setPen(QColor(CDST.c(dark, CDSTT.text_2)))
+        p.setPen(_qc(CDST.c(dark, CDSTT.text_2)))
         p.setFont(self._f_badge)
         p.drawText(QRect(vbr.left() + 15, vbr.top(), tw + 4, vbr.height()),
                    Qt.AlignLeft | Qt.AlignVCenter, vtext)
@@ -355,15 +356,15 @@ class CardDelegate(QStyledItemDelegate):
             bw = self._fm_badge.horizontalAdvance(btxt) + 10
             br = QRect(r.right() - bw - 8, r.bottom() - 55, bw, 15)
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(CDST.c(dark, CDSTT.muted)))
+            p.setBrush(_qc(CDST.c(dark, CDSTT.muted)))
             p.drawRoundedRect(br, CDST.R_SM, CDST.R_SM)
-            p.setPen(QColor(CDST.c(dark, CDSTT.text_3)))
+            p.setPen(_qc(CDST.c(dark, CDSTT.text_3)))
             p.setFont(self._f_badge)
             p.drawText(br, Qt.AlignCenter, btxt)
         # 命中原因：中性灰（不再整屏红字；语义色只保留在判定标签上）
         reason = self._fm_reason.elidedText("; ".join(h.get("label", "") for h in it["reasons"]),
                                             Qt.ElideRight, r.width() - 20)
-        p.setPen(QColor(CDST.c(dark, CDSTT.text_2)))
+        p.setPen(_qc(CDST.c(dark, CDSTT.text_2)))
         p.setFont(self._f_reason)
         p.drawText(QRect(r.left() + 10, r.bottom() - 37, r.width() - 20, 13),
                    Qt.AlignLeft | Qt.AlignVCenter, reason)
@@ -371,23 +372,23 @@ class CardDelegate(QStyledItemDelegate):
         folder = it.get("_folder") or ""
         if folder:
             ftext = self._fm_reason.elidedText(folder, Qt.ElideMiddle, r.width() - 34)
-            p.setPen(QColor(CDST.c(dark, CDSTT.text_2)))
+            p.setPen(_qc(CDST.c(dark, CDSTT.text_2)))
             p.setFont(self._f_reason)
             # 自绘文件夹小图标（不用 emoji——部分字体缺字形会显示成方块）
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(CDST.c(dark, CDSTT.text_3)))
+            p.setBrush(_qc(CDST.c(dark, CDSTT.text_3)))
             p.drawRoundedRect(QRect(r.left() + 10, r.bottom() - 18, 11, 8), 2, 2)
             p.drawRoundedRect(QRect(r.left() + 10, r.bottom() - 21, 5, 3), 1, 1)
-            p.setPen(QColor(CDST.c(dark, CDSTT.text_2)))
+            p.setPen(_qc(CDST.c(dark, CDSTT.text_2)))
             p.drawText(QRect(r.left() + 25, r.bottom() - 21, r.width() - 35, 14),
                        Qt.AlignLeft | Qt.AlignVCenter, ftext)
         cr = QRect(r.left() + 8, r.top() + 8, 22, 22)
         checked = it["path"] in self.model.checked
         if checked:
-            p.setBrush(QColor(CDST.c(dark, CDSTT.clay)))
+            p.setBrush(_qc(CDST.c(dark, CDSTT.clay)))
             p.setPen(Qt.NoPen)
             p.drawEllipse(cr)
-            p.setPen(QPen(QColor(CDST.c(dark, CDSTT.text_on_clay)), 2))
+            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.text_on_clay)), 2))
             p.drawLine(cr.left() + 6, cr.center().y(), cr.center().x() - 1, cr.bottom() - 7)
             p.drawLine(cr.center().x() - 1, cr.bottom() - 7, cr.right() - 5, cr.top() + 7)
         elif hovered:
@@ -397,7 +398,7 @@ class CardDelegate(QStyledItemDelegate):
         gi = self.model.sim_map.get(it["path"])
         if gi is not None:
             # 相似组用琥珀（warn）——与判定的 clay/红区分开，形成色彩层次
-            p.setPen(QPen(QColor(CDST.c(dark, CDSTT.warn))))
+            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.warn))))
             p.setFont(self._f_reason)
             p.drawText(QRect(r.right() - 48, r.top() + 6, 40, 16),
                        Qt.AlignRight | Qt.AlignVCenter, f"⟲{len(self.model.sim_groups[gi])}")
@@ -1250,20 +1251,20 @@ class StatusDot(QWidget):
         d = isDarkTheme()
         # 语义色：running=橙(品牌动作) done=绿 error=红 warn=琥珀 ready=灰
         if self._state == "error":
-            c, r = QColor(CDST.c(d, CDSTT.danger)), 3.0
+            c, r = _qc(CDST.c(d, CDSTT.danger)), 3.0
         elif self._state == "done":
-            c, r = QColor(CDST.c(d, CDSTT.ok)), 3.0
+            c, r = _qc(CDST.c(d, CDSTT.ok)), 3.0
         elif self._state == "warn":
-            c, r = QColor(CDST.c(d, CDSTT.warn)), 3.0
+            c, r = _qc(CDST.c(d, CDSTT.warn)), 3.0
         elif self._state == "running":
-            c = QColor(CDST.c(d, CDSTT.clay))
+            c = _qc(CDST.c(d, CDSTT.clay))
             # clay 呼吸：scale 0.86 → 1.0、亮度 0.96 → 1.06
             ph = (math.sin(self._t * 2 * math.pi) + 1) / 2
             r = 3.0 * (0.86 + 0.14 * ph)
             h, s, v, a = c.getHsvF()
             c = QColor.fromHsvF(h, s, min(1.0, v * (0.96 + 0.10 * ph)), a)
         else:
-            c, r = QColor(CDST.c(d, CDSTT.text_3)), 3.0
+            c, r = _qc(CDST.c(d, CDSTT.text_3)), 3.0
         p.setBrush(c)
         p.drawEllipse(int(5 - r), int(5 - r), int(r * 2), int(r * 2))
 
@@ -2834,7 +2835,7 @@ class App(FramelessWindow):
         dark = isDarkTheme()
         pal = self.grid.palette()
         pal.setColor(QPalette.Highlight, QColor(217, 119, 87, 56 if not dark else 64))
-        pal.setColor(QPalette.HighlightedText, QColor(CDST.c(dark, CDSTT.text)))
+        pal.setColor(QPalette.HighlightedText, _qc(CDST.c(dark, CDSTT.text)))
         self.grid.setPalette(pal)
         band = getattr(self, "_sel_band", None)
         if band is not None:
@@ -3656,6 +3657,26 @@ class QuarantineDialog(MessageBoxBase):
 
 
 # ================================================================ 入口
+def _qc(css) -> "QColor":
+    """CSS 颜色串 → QColor。**QPainter 自绘必须用它，不能直接 QColor(str)**：
+    QColor 只认 #RRGGBB / 整数 alpha，不认 CSS 的 rgba(r,g,b,0.06) 浮点语法，
+    解析失败会得到无效色，QPainter 按黑色画——"浅色主题下选中卡变黑"的真正根因
+    （选中态要叠一层 clay_fill = rgba(...,0.06)，于是整卡被刷黑）。"""
+    s = str(css).strip()
+    m = re.match(r"^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)"
+                 r"(?:\s*,\s*([\d.]+))?\s*\)$", s)
+    if m:
+        r, g, b = (int(float(m.group(i))) for i in (1, 2, 3))
+        a = m.group(4)
+        if a is None:
+            return QColor(r, g, b)
+        af_ = float(a)
+        alpha = int(round(af_ * 255)) if af_ <= 1.0 else int(af_)
+        return QColor(r, g, b, max(0, min(255, alpha)))
+    c = QColor(s)
+    return c if c.isValid() else QColor(0, 0, 0, 0)
+
+
 def app_icon_pixmap(size: int = 64) -> "QPixmap":
     """应用图标：圆角陶土橙底 + 白色扫帚 + 清扫星点（ImageGen 按 Material 风格
     设计共识生成：具象符号+情境元素、高对比、小尺寸可辨；水印已清理）。
@@ -4317,6 +4338,11 @@ def gui_func_test() -> int:
               and not app.grid.isSelectionRectVisible())
         check("框选 overlay 配色为品牌橙", "217,119,87" in app._sel_band.styleSheet(),
               app._sel_band.styleSheet()[:50])
+        # 锁死"QColor 不能直接吃 rgba 浮点 alpha"这个坑（曾致选中卡整卡被刷黑）
+        _c = _qc("rgba(217,119,87,0.06)")
+        check("颜色解析 rgba 浮点 alpha", _c.isValid() and _c.red() == 217 and _c.alpha() == 15,
+              str(_c.getRgb()))
+        check("颜色解析 hex 正常", _qc("#FFFFFF").getRgb() == (255, 255, 255, 255))
         if app.model.items:
             import pathlib as _pl
             _folder = _pl.Path(app.model.items[0]["path"]).parent
