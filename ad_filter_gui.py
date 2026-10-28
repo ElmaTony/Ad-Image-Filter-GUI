@@ -193,6 +193,9 @@ class CardDelegate(QStyledItemDelegate):
         self._fm_reason = QFontMetrics(self._f_reason)
         self._fm_badge = QFontMetrics(self._f_badge)
         self._birth: dict = {}   # path -> 出生时刻（入场动画用）
+        # 主题由 App._apply_theme 统一推送（paint 里不再自己读 isDarkTheme——
+        # 曾出现框架浅色而卡片画成深色的不一致，改为单一来源）
+        self.dark = True
 
     def note_birth(self, paths):
         now = time.time()
@@ -237,7 +240,26 @@ class CardDelegate(QStyledItemDelegate):
                 p.translate(c.x(), c.y())
                 p.scale(s, s)
                 p.translate(-c.x(), -c.y())
-        dark = isDarkTheme()
+        # 主题：**直接读主窗口当前的 theme 字段**（toggle_theme/__init__ 里与界面 QSS
+        # 同一次赋值，天然同源；不经过任何缓存推送，杜绝"界面浅色而卡片深色"）。
+        try:
+            _win = self.parent().window() if self.parent() else None
+            _t = getattr(_win, "theme", None)
+            dark = (_t == "dark") if _t in ("dark", "light") else self.dark
+        except Exception:
+            dark = self.dark
+        # —— 临时诊断（用户连续报告"浅色主题下选中卡是黑的"，需真实运行数据）——
+        try:
+            if not getattr(self, "_dbg_once", False):
+                self._dbg_once = True
+                with open(r"F:\Project\ad-filter-gui\_paint_debug.log", "a",
+                          encoding="utf-8") as _f:
+                    _f.write(
+                        f"dark={dark} self.dark={self.dark} isDarkTheme={isDarkTheme()} "
+                        f"card={CDST.c(dark, CDSTT.surface2)} "
+                        f"winBg={self.parent().palette().color(QPalette.Window).name() if self.parent() else '?'}\n")
+        except Exception:
+            pass
         r = QRect(opt.rect).adjusted(5, 5, -5, -5)
         from PySide6.QtWidgets import QStyle
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)
@@ -1390,6 +1412,8 @@ class App(FramelessWindow):
         """)
         self._apply_brand_style()
         self._apply_info_bg()
+        if getattr(self, "delegate", None) is not None:
+            self.delegate.dark = d          # 卡片绘制主题：与界面同源推送
         if hasattr(self, "log"):
             self._apply_log_bg()
         if hasattr(self, "seg_disposal"):
@@ -1672,6 +1696,7 @@ class App(FramelessWindow):
         self.grid.setSelectionRectVisible(True)
         self.grid.setModel(self.model)
         self.delegate = CardDelegate(self.thumbs, self.model, self.grid)
+        self.delegate.dark = isDarkTheme()      # 初始主题推送给 delegate
         self.grid.setItemDelegate(self.delegate)
         self.grid.setFrameShape(QListView.NoFrame)
         self.grid.setStyleSheet("QListView { background: transparent; }")
