@@ -22,7 +22,7 @@ from cds_tokens import T as CDSTT       # 主题类属性（surface / text / bor
 from PySide6.QtCore import (QAbstractListModel, Property, QEvent, QModelIndex, QObject, QRect, QSize,
                             Qt, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage,
-                          QLinearGradient, QPainter, QKeySequence, QShortcut,
+                          QLinearGradient, QPainter, QKeySequence, QPalette, QShortcut,
                            QPen, QPixmap)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFrame,
                                QHBoxLayout,
@@ -1387,6 +1387,7 @@ class App(FramelessWindow):
         if hasattr(self, "_empty"):
             # 空状态图标底同理（用户报浅色下残留黑色方块 = 深色 muted 底未重刷）
             self._empty.refresh_theme(d)
+        self._apply_selection_palette()   # 框选色随主题（品牌橙半透明）
         if hasattr(self, "status_pill"):
             # 控件自定义样式按「当前主题」生成（setCustomStyleSheet 双套参数在部分
             # 组件上不重放——见踩坑记录），所以主题切换必须整体重刷一次
@@ -1660,6 +1661,9 @@ class App(FramelessWindow):
         self.grid.setItemDelegate(self.delegate)
         self.grid.setFrameShape(QListView.NoFrame)
         self.grid.setStyleSheet("QListView { background: transparent; }")
+        # 框选矩形颜色 = QPalette.Highlight（QStyle 绘制，QSS 管不到）。默认深蓝
+        # #024163 实心块在暖色界面上极违和——改为品牌橙低透明度（用户报"框选色太深"）
+        self._apply_selection_palette()
         self.grid.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.grid.selectionModel().currentChanged.connect(self._on_current_changed)
         self.grid.doubleClicked.connect(lambda _idx: self.open_big())          # 双击开大图
@@ -2741,6 +2745,19 @@ class App(FramelessWindow):
             self.open_palette()
             return
         super().keyPressEvent(e)
+
+    def _apply_selection_palette(self):
+        """框选/原生选中底色 = 品牌橙低透明度。
+        QStyle 用 QPalette.Highlight 绘制框选矩形（QSS 管不到），默认深蓝
+        #024163 完全不透明，在暖色界面上极违和（用户报"框选色太深"）。"""
+        if not hasattr(self, "grid"):
+            return
+        dark = isDarkTheme()
+        pal = self.grid.palette()
+        pal.setColor(QPalette.Highlight, QColor(217, 119, 87, 56 if not dark else 64))
+        pal.setColor(QPalette.HighlightedText, QColor(CDST.c(dark, CDSTT.text)))
+        self.grid.setPalette(pal)
+        self.grid.viewport().update()
 
     def set_layout(self, mode: str = "workbench"):
         """布局已固定为单一形态（用户决定删除三骨架切换）。
