@@ -448,19 +448,20 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
         verdict = "ad"
         score = 99
 
-    # 2) 形状规则（只读头；受 enable 开关控制）
+    # 2) 形状规则（只读头；受 enable 开关控制）——**只提示，不定案**：
+    # 真实场景的广告多是「原图副本上贴牛皮癣」，尺寸/比例都正常；实测关掉形状后
+    # 有内容的横条广告 4/4 仍被 OCR/QR 抓住。极长横条仅记 shape_long，
+    # 内容通道无更强证据时才落"疑似"（30），绝不直接判广告。
+    shape_long = False
     if verdict == "clean" and enable.get("shape", True):
         try:
             with Image.open(path) as im:
                 w, h = im.size
             ratio = max(w, h) / max(1, min(w, h))
-            # 横条铁证门槛单独设（默认 8:1）：真实推广横条实测都在 8.8:1 以上
-            # （740x84 起），而 3~8:1 是拼图/长图/多图拼接的高发区——曾把 1920x544
-            # 的七图拼排误判成广告。该区间不靠形状定案，交给 QR/OCR 按内容判断。
             ratio_hard = float(cfg["shape"].get("max_ratio_hard", 8.0))
             if w >= h and ratio >= ratio_hard:
                 reasons.append({"type": "shape", "label": f"极端横条 {w}x{h}（{ratio:.1f}:1）"})
-                verdict, score = "ad", 90
+                shape_long = True      # 只记疑，继续走 QR/OCR 找内容证据
             elif min(w, h) < cfg["shape"]["min_side"]:
                 reasons.append({"type": "shape", "label": f"分辨率过小 {w}x{h}"})
                 verdict, score = "suspect", 20
@@ -574,9 +575,13 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
             except Exception as e:
                 reasons.append({"type": "error", "label": f"OCR失败 {e}"})
 
-        if verdict == "clean" and qr_suspect:
-            # OCR 也没找到更强证据，落回"疑似"
+        if verdict == "clean" and (qr_suspect or shape_long):
+            # 内容通道也没找到更强证据，落回"疑似"（形状/二维码图形本身只算提示）
             verdict, score = "suspect", 30
+
+    if verdict == "clean" and shape_long:
+        # QR/OCR 通道全关时的兜底：形状提示单独落地为疑似（永不直接判广告）
+        verdict, score = "suspect", 30
 
     result = {"path": str(path), "verdict": verdict, "score": score, "reasons": reasons, "ocr_text": ocr_text}
     cache.put(str(path), size, mtime, verdict, score, reasons, ocr_text)
