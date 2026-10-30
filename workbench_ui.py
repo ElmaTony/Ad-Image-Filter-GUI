@@ -353,28 +353,5 @@ def build_workbench(app):
 
 def style_dialog(dialog):
     """所有配套窗口与主工作台使用相同表面和排版。"""
-    import cds_tokens as T
-    from qfluentwidgets import isDarkTheme
-    dark = isDarkTheme()
-    surface, text, border = (T.c(dark, x) for x in (T.T.surface0, T.T.text, T.T.border))
-    dialog.widget.setObjectName('workbenchDialog')
-    dialog.widget.setStyleSheet(
-        f'#workbenchDialog {{ background:{surface}; border:1px solid {border}; border-radius:16px; }}'
-        f'QLabel {{ color:{text}; font-family:"Microsoft YaHei UI"; }}'
-    )
-    content = QWidget(dialog.widget)
-    dialog.vBoxLayout.removeItem(dialog.viewLayout)
-    dialog.viewLayout.setParent(None)
-    content.setLayout(dialog.viewLayout)
-    scroll = QScrollArea(dialog.widget)
-    scroll.setWidgetResizable(True)
-    scroll.setFrameShape(QScrollArea.NoFrame)
-    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-    scroll.setStyleSheet(f'QScrollArea, QScrollArea > QWidget > QWidget {{ background:{surface}; border:none; }}')
-    scroll.setWidget(content)
-    dialog.vBoxLayout.insertWidget(0, scroll, 1)
-    dialog.content_scroll = scroll
-    # 低分辨率屏幕上让正文滚动，始终保留确认/取消动作。
-    screen = dialog.screen()
-    if screen:
-        dialog.widget.setMaximumHeight(max(360, screen.availableGeometry().height() - 60))
+    from dialog_ui import style_dialog as apply
+    return apply(dialog)

@@ -82,6 +82,8 @@ DEFAULT_CONFIG = {
     },
     "workers": 4,
     "disposal": "quarantine",
+    "quarantine_dir": "",
+    "quarantine_locations": [],
     "phash": {"enabled": True, "threshold": 6},
 }
 
@@ -591,10 +593,18 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
 # ---------------------------------------------------------------- 扫描编排
 def gather_images(roots: list[str], cfg: dict) -> list[Path]:
     files: list[Path] = []
+    excluded = [Path(p).expanduser().resolve() for p in
+                [cfg.get('quarantine_dir', '')] + cfg.get('quarantine_locations', []) if p]
+    def is_quarantined(path):
+        resolved = path.resolve()
+        return any(resolved == q or q in resolved.parents for q in excluded)
     for root in roots:
         rootp = Path(root)
+        if is_quarantined(rootp):
+            continue
         for dirpath, dirnames, filenames in os.walk(rootp):
-            dirnames[:] = [d for d in dirnames if not d.startswith(QUARANTINE_NAME)]
+            dirnames[:] = [d for d in dirnames if not d.startswith(QUARANTINE_NAME)
+                          and not is_quarantined(Path(dirpath) / d)]
             for fn in filenames:
                 if Path(fn).suffix.lower() in IMG_EXTS:
                     files.append(Path(dirpath) / fn)

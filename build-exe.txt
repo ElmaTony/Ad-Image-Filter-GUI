@@ -11,6 +11,7 @@ pyinstaller --noconfirm --noconsole --onefile --name 广告图过滤 ^
   --hidden-import cds_widgets ^
   --hidden-import cds_layouts ^
   --hidden-import workbench_ui ^
+  --hidden-import dialog_ui ^
   --hidden-import icon_embed ^
   --exclude-module transformers ^
   --exclude-module sklearn ^

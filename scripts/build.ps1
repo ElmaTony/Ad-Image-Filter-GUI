@@ -12,7 +12,7 @@ $arguments = @('-m', 'PyInstaller', '--noconfirm', '--clean', '--noconsole', '--
 foreach ($module in @('rapidocr_onnxruntime','onnxruntime','qfluentwidgets','qframelesswindow','pyzbar')) {
     $arguments += @('--collect-all', $module)
 }
-foreach ($module in @('cds_tokens','cds_widgets','cds_layouts','workbench_ui','icon_embed')) {
+foreach ($module in @('cds_tokens','cds_widgets','cds_layouts','workbench_ui','dialog_ui','icon_embed')) {
     $arguments += @('--hidden-import', $module)
 }
 foreach ($module in @('transformers','sklearn','scipy','nltk','torch','cupy','dask','pandas','matplotlib',

@@ -185,6 +185,123 @@ class WorkbenchTests(unittest.TestCase):
             self.assertLess(point.x(), self.app.width())
             self.assertLess(point.y(), self.app.height())
 
+    def test_palette_keyboard_and_repeated_button_toggle(self):
+        from PySide6.QtTest import QTest
+        self.app.open_palette()
+        palette = self.app._palette
+        palette.edit.setText('隔离')
+        QTest.keyClick(palette.edit, Qt.Key_Escape)
+        self.pump(.1)
+        self.assertFalse(palette.isVisible())
+        self.app.btn_palette.click()
+        self.pump(.1)
+        self.assertTrue(self.app._palette.isVisible())
+        self.app.btn_palette.click()
+        self.assertFalse(self.app._palette.isVisible())
+        self.app.open_palette()
+        palette = self.app._palette
+        QTest.keyClick(palette.edit, Qt.Key_K, Qt.ControlModifier)
+        self.assertFalse(palette.isVisible())
+        self.app.open_palette()
+        palette = self.app._palette
+        QTest.keyClick(palette.edit, Qt.Key_Down)
+        self.assertEqual(palette.list.currentRow(), 1)
+        called = []
+        palette.cmds = [('演示命令', lambda: called.append(True))]
+        palette.edit.setText('演示')
+        QTest.keyClick(palette.edit, Qt.Key_Return)
+        self.assertEqual(called, [True])
+        self.assertFalse(palette.isVisible())
+
+    def test_custom_quarantine_save_scan_exclusion_and_restore(self):
+        self.app._quarantine_override = None
+        self.app._roots = [str(self.root)]
+        custom = self.root / '自定义存储'
+        dialog = self.app.build_config()
+        dialog.quarantine_path.setText(str(custom))
+        self.assertTrue(dialog.validate())
+        self.assertEqual(self.app._quarantine_root(), custom)
+        self.assertEqual(af.load_config()['quarantine_dir'], str(custom))
+        self.app.toggle_check(0)
+        self.app.execute_disposal()
+        self.assertTrue(self.pump(until=lambda: not self.app._disposing))
+        self.assertTrue((custom / 'manifest.json').exists())
+        files = af.gather_images([str(self.root)], self.app.cfg)
+        self.assertFalse(any(custom in p.parents for p in files))
+        self.assertEqual(af.gather_images([str(custom)], self.app.cfg), [])
+        other = self.root / '新的隔离区'
+        dialog = self.app.build_config()
+        dialog.quarantine_path.setText(str(other))
+        dialog.validate()
+        self.assertIn(str(custom), self.app.cfg['quarantine_locations'])
+        self.assertFalse(any(custom in p.parents for p in af.gather_images([str(self.root)], self.app.cfg)))
+        manager = gui.QuarantineDialog(self.app, custom)
+        self.app._qdlg = manager
+        manager.table.selectRow(0)
+        self.assertTrue(manager.btn_rs.isEnabled())
+        manager._restore_selected()
+        self.assertTrue(self.pump(until=lambda: not self.app._file_busy))
+        self.assertTrue(Path(self.rows[0]['path']).exists())
+        self.assertEqual(manager.table.rowCount(), 0)
+        self.assertFalse(manager.btn_rs.isEnabled())
+        self.app._qdlg = None
+        manager.close()
+
+    def test_quarantine_setting_validation_and_import(self):
+        dialog = self.app.build_config()
+        original = copy.deepcopy(self.app.cfg)
+        for path in ('relative/path', str(Path(self.root.anchor)), self.rows[0]['path']):
+            dialog.quarantine_path.setText(path)
+            self.assertFalse(dialog.validate())
+            self.assertEqual(self.app.cfg, original)
+        data = copy.deepcopy(af.DEFAULT_CONFIG)
+        custom = self.root / '导入的隔离目录'
+        data['quarantine_dir'] = str(custom)
+        filename = self.root / 'custom.json'
+        filename.write_text(json.dumps(data), encoding='utf-8')
+        with patch.object(QFileDialog, 'getOpenFileName', return_value=(str(filename), 'json')):
+            dialog._import_cfg()
+        self.assertEqual(dialog.quarantine_path.text(), str(custom))
+        self.app._quarantine_override = None
+        self.assertEqual(self.app._quarantine_root(), custom)
+        dialog.quarantine_path.clear()
+        self.assertTrue(dialog.validate())
+        self.assertEqual(self.app.cfg['quarantine_dir'], '')
+        self.assertIn(str(custom), self.app.cfg['quarantine_locations'])
+
+    def test_dialog_navigation_history_search_and_escape(self):
+        from PySide6.QtTest import QTest
+        from dialog_ui import NoticeDialog
+        af.append_history(dict(time='2026-10-30 10:00', roots=['演示目录'], total=10, hits=2))
+        dialogs = [self.app.build_config(), self.app.build_rule_editor(),
+                   gui.HistoryDialog(self.app), gui.QuarantineDialog(self.app, self.root / 'quarantine'),
+                   NoticeDialog(self.app, '隔离确认', '示例内容\n' * 25)]
+        for theme in ('light', 'dark'):
+            if self.app.theme != theme:
+                self.app.toggle_theme()
+            for dialog in dialogs:
+                dialog.show()
+                self.pump(.1)
+                self.assertTrue(dialog.closeButton.isVisible())
+                self.assertTrue(dialog.cancelButton.isVisible() or dialog.yesButton.isVisible())
+                for button in (dialog.cancelButton, dialog.yesButton):
+                    if button.isVisible():
+                        self.assertLessEqual(button.mapTo(dialog, button.rect().bottomRight()).y(), dialog.height())
+                QTest.keyClick(dialog, Qt.Key_Escape)
+                self.assertFalse(dialog.isVisible())
+        settings, rules, history = dialogs[:3]
+        settings.navigation.setCurrentRow(2)
+        self.assertEqual(settings.page_stack.currentIndex(), 2)
+        rules.pivot.setCurrentItem('tester')
+        self.assertEqual(rules.navigation.currentRow(), 3)
+        self.assertIs(rules.stack.currentWidget(), rules._pages['tester']['page'])
+        history.search.setText('不存在')
+        self.assertTrue(history.table.isRowHidden(0))
+        history.search.setText('演示')
+        self.assertFalse(history.table.isRowHidden(0))
+        for dialog in dialogs:
+            dialog.deleteLater()
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

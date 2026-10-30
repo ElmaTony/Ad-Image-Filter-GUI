@@ -20,6 +20,7 @@ from pathlib import Path
 
 import ad_filter as af
 import cds_tokens as CDST
+from dialog_ui import WorkbenchDialog, NoticeDialog
 from cds_tokens import T as CDSTT       # 主题类属性（surface / text / border / 判定色 …）
 
 from PySide6.QtCore import (QAbstractListModel, Property, QEvent, QModelIndex, QObject, QRect, QSize,
@@ -34,7 +35,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFr
                                QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget)
 
 from qfluentwidgets import (CaptionLabel, CheckBox, ComboBox, FluentIcon as FIF, InfoBar,
-                            InfoBarPosition, ListWidget, MessageBox, MessageBoxBase, Pivot,
+                            InfoBarPosition, ListWidget, Pivot,
                             PrimaryPushButton, ProgressBar, PushButton,
                             RadioButton, SearchLineEdit, SubtitleLabel, TableWidget, TextEdit,
                             Theme, ToolButton, TransparentPushButton, TransparentToolButton,
@@ -842,15 +843,24 @@ class Lightbox(QWidget):
         """顶部文件名 + 右上关闭；底部判定信息条。"""
         it = self._it()
         name = Path(self.path).name
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor('#20201e'))
+        p.drawRect(QRect(0, 0, self.width(), 58))
+        p.drawRect(QRect(0, self.height() - 62, self.width(), 62))
         # 顶部左：文件名
         p.setPen(QColor("#e8e6e0"))
         p.setFont(QFont("Microsoft YaHei UI", 10))
-        p.drawText(QRect(18, 14, self.width() - 100, 24), Qt.AlignLeft | Qt.AlignVCenter, name)
+        p.drawText(QRect(20, 9, self.width() - 140, 24), Qt.AlignLeft | Qt.AlignVCenter,
+                   QFontMetrics(p.font()).elidedText(name, Qt.ElideMiddle, self.width() - 140))
+        p.setPen(QColor('#aaa59c'))
+        p.setFont(QFont('Microsoft YaHei UI', 8))
+        p.drawText(QRect(20, 32, self.width() - 140, 18), Qt.AlignLeft | Qt.AlignVCenter,
+                   f'大图审查   ·   缩放 {self.scale:.0%}   ·   ← → 切换   ·   Esc 关闭')
         # 右上：关闭
         cr = QRect(self.width() - 46, 14, 30, 30)
         p.setPen(QPen(QColor(255, 255, 255, 130), 1.4))
         p.setBrush(QColor(255, 255, 255, 20))
-        p.drawEllipse(cr)
+        p.drawRoundedRect(cr, 7, 7)
         p.drawLine(cr.left() + 8, cr.top() + 8, cr.right() - 8, cr.bottom() - 8)
         p.drawLine(cr.right() - 8, cr.top() + 8, cr.left() + 8, cr.bottom() - 8)
         # 底部信息条
@@ -864,9 +874,9 @@ class Lightbox(QWidget):
             bar_h = 40
             bar = QRect(0, self.height() - bar_h - 16, self.width(), bar_h)
             fm = QFontMetrics(QFont("Microsoft YaHei UI", 9))
-            txt = fm.elidedText(line, Qt.ElideMiddle, self.width() - 60)
-            tw = min(self.width() - 40, fm.horizontalAdvance(txt) + 32)
-            bx = (self.width() - tw) // 2
+            txt = fm.elidedText(line, Qt.ElideMiddle, max(80, self.width() - 340))
+            tw = min(max(80, self.width() - 320), fm.horizontalAdvance(txt) + 32)
+            bx = 18
             pill = QRect(bx, self.height() - bar_h - 12, tw, 32)
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(11, 11, 11, 200))
@@ -1284,8 +1294,11 @@ class App(FramelessWindow):
         configure_fonts()
         super().__init__()
         self.setObjectName("mainWindow")
+        self._command_shortcut = QShortcut(QKeySequence('Ctrl+K'), self)
+        self._command_shortcut.activated.connect(self.open_palette)
         self.cfg = cfg
         self.theme = cfg.get("ui_theme", "light")
+        setThemeColor(CDST.BRAND)
         setTheme(Theme.DARK if self.theme == "dark" else Theme.LIGHT)
         scr = self.screen().availableGeometry() if self.screen() else None
         self.resize(min(1500, scr.width() - 80) if scr else 1460,
@@ -1905,10 +1918,10 @@ class App(FramelessWindow):
 
     # ---------- 弹窗 ----------
     def _ask(self, title, content):
-        return bool(MessageBox(title, content, self).exec())
+        return bool(NoticeDialog(self, title, content).exec())
 
     def _info(self, title, content):
-        MessageBox(title, content, self).exec()
+        NoticeDialog(self, title, content, confirmation=False).exec()
 
     def _toast(self, content, ok=True):
         """CDS Toast：右下角 3000ms 自消失（claudecodeui 规范）。
@@ -1924,6 +1937,12 @@ class App(FramelessWindow):
 
     def open_palette(self):
         """⌘K 命令面板（claudecodeui 范式）：所有操作一个入口。"""
+        palette = getattr(self, '_palette', None)
+        if palette is not None and palette.isVisible():
+            palette.close()
+            return self
+        if palette is not None:
+            palette.deleteLater()
         cmds = [
             ('添加文件夹', self.add_folder),
             ('扫描设置', self.open_config),
@@ -2288,8 +2307,6 @@ class App(FramelessWindow):
                 if dlg is not None:
                     try:
                         dlg.reload()
-                        for b in (dlg.btn_rs, dlg.btn_dl, dlg.btn_ra):
-                            b.setEnabled(True)
                     except RuntimeError:
                         self._qdlg = None
             self._sync_actions()
@@ -2490,6 +2507,9 @@ class App(FramelessWindow):
     def _quarantine_root(self):
         if self._quarantine_override is not None:
             return Path(self._quarantine_override)
+        custom = self.cfg.get('quarantine_dir', '')
+        if custom:
+            return Path(custom).expanduser().resolve()
         roots = self.get_roots()
         base = Path(roots[0]).anchor if roots else Path.home().anchor
         return Path(base) / af.QUARANTINE_NAME
@@ -2925,30 +2945,33 @@ class FolderDropList(ListWidget):
         e.acceptProposedAction()
 
 
-class ConfigDialog(MessageBoxBase):
+class ConfigDialog(WorkbenchDialog):
     """扫描设置：文件夹 + 识别方式 + 线程 + 规则入口。"""
 
     def __init__(self, app, cfg):
         super().__init__(app)
         self.app = app
         self.cfg = cfg
-        self.widget.setFixedWidth(640)
+        self.widget.setFixedWidth(880)
 
         self.viewLayout.addWidget(SubtitleLabel("扫描设置", self.widget))
-        tip = CaptionLabel("添加要扫描的文件夹、选择识别方式。", self.widget)
+        tip = CaptionLabel("按工作流程整理扫描、识别与文件处置选项。保存后生效。", self.widget)
         tip.setWordWrap(True)
         self.viewLayout.addWidget(tip)
 
-        self.viewLayout.addWidget(CaptionLabel("文件夹（可直接拖入）", self.widget))
+        from dialog_ui import section, navigation
+        folders, folder_layout = section('扫描目录', '可添加多个目录，也可直接将文件夹拖入下方列表。', self)
+        recognition, recognition_layout = section('识别选项', '按需要开启识别方式，并调整扫描性能。', self)
+        storage, storage_layout = section('隔离与配置', '指定文件隔离位置，或导入、导出配置。', self)
         self.folder_list = FolderDropList(self.widget)
         for r in app.get_roots():
             it = QListWidgetItem(str(r))
             it.setData(Qt.UserRole, str(r))
             self.folder_list.addItem(it)
-        self.folder_list.setFixedHeight(140)
+        self.folder_list.setMinimumHeight(210)
         self.folder_list.setTextElideMode(Qt.ElideMiddle)
         self.folder_list.setAcceptDrops(True)
-        self.viewLayout.addWidget(self.folder_list)
+        folder_layout.addWidget(self.folder_list, 1)
         frow = QHBoxLayout()
         b_add = TransparentPushButton(FIF.FOLDER_ADD, "添加文件夹", self.widget)
         b_add.clicked.connect(self._add)
@@ -2962,12 +2985,12 @@ class ConfigDialog(MessageBoxBase):
         b_imp = TransparentPushButton(FIF.FOLDER_ADD, "导入配置", self.widget)
         b_imp.setToolTip("从 JSON 文件导入配置（覆盖当前配置并立即保存）")
         b_imp.clicked.connect(self._import_cfg)
-        for b in (b_add, b_rm, b_rules, b_exp, b_imp):
+        for b in (b_add, b_rm):
             frow.addWidget(b)
         frow.addStretch(1)
-        self.viewLayout.addLayout(frow)
+        folder_layout.addLayout(frow)
 
-        self.viewLayout.addWidget(CaptionLabel("识别方式", self.widget))
+        recognition_layout.addWidget(CaptionLabel("识别方式", self.widget))
         crow = QHBoxLayout()
         self.cb_fn = CheckBox("文件名", self.widget)
         self.cb_fn.setChecked(cfg.get("_enable_filename", True))
@@ -2982,7 +3005,7 @@ class ConfigDialog(MessageBoxBase):
         for c in (self.cb_fn, self.cb_shape, self.cb_qr, self.cb_ocr, self.cb_sim):
             crow.addWidget(c)
         crow.addStretch(1)
-        self.viewLayout.addLayout(crow)
+        recognition_layout.addLayout(crow)
 
         orow = QHBoxLayout()
         orow.addWidget(CaptionLabel("全图兜底", self.widget))
@@ -2991,14 +3014,15 @@ class ConfigDialog(MessageBoxBase):
         self.ocr_scope.setCurrentIndex(1 if cfg.get("ocr", {}).get("full_image_if_nothing", True) else 0)
         self.ocr_scope.setToolTip("未达到广告高阈值时补扫全图，以识别中央水印")
         orow.addWidget(self.ocr_scope)
-        orow.addSpacing(16)
+        recognition_layout.addLayout(orow)
+        orow = QHBoxLayout()
         orow.addWidget(CaptionLabel("线程", self.widget))
         self.cb_workers = ComboBox(self.widget)
         self.cb_workers.addItems([str(i) for i in range(1, 17)])
         self.cb_workers.setCurrentIndex(max(0, min(15, int(cfg.get("workers", 4)) - 1)))
         orow.addWidget(self.cb_workers)
         orow.addStretch(1)
-        self.viewLayout.addLayout(orow)
+        recognition_layout.addLayout(orow)
 
         from PySide6.QtWidgets import QSpinBox
         advanced = QHBoxLayout()
@@ -3010,12 +3034,44 @@ class ConfigDialog(MessageBoxBase):
         advanced.addWidget(self.sim_threshold)
         advanced.addStretch()
         limit = min(os.cpu_count() or 4, 8)
-        advanced.addWidget(CaptionLabel(f'本机实际并行上限 {limit} 线程', self.widget))
-        self.viewLayout.addLayout(advanced)
+        recognition_layout.addLayout(advanced)
+        recognition_layout.addWidget(CaptionLabel(f'本机实际并行上限 {limit} 线程', self.widget))
+        recognition_layout.addWidget(b_rules, 0, Qt.AlignLeft)
+        recognition_layout.addStretch()
+
+        from PySide6.QtWidgets import QLineEdit
+        storage_layout.addWidget(CaptionLabel('隔离目录', self))
+        self.quarantine_path = QLineEdit(self)
+        self.quarantine_path.setPlaceholderText('留空：使用扫描盘的 _广告隔离 目录')
+        self.quarantine_path.setText(cfg.get('quarantine_dir', ''))
+        self.quarantine_path.setMinimumHeight(36)
+        storage_layout.addWidget(self.quarantine_path)
+        qrow = QHBoxLayout()
+        choose = PushButton('选择目录…', self)
+        choose.clicked.connect(self._choose_quarantine)
+        reset = PushButton('恢复默认', self)
+        reset.clicked.connect(self.quarantine_path.clear)
+        qrow.addWidget(choose)
+        qrow.addWidget(reset)
+        qrow.addStretch()
+        storage_layout.addLayout(qrow)
+        hint = CaptionLabel('更改目录只影响之后的隔离操作，不移动已有文件。\n旧隔离区仍可在“隔离区管理”中切换打开；隔离目录会自动跳过扫描。', self)
+        hint.setWordWrap(True)
+        storage_layout.addWidget(hint)
+        storage_layout.addSpacing(16)
+        storage_layout.addWidget(CaptionLabel('配置备份', self))
+        backup = QHBoxLayout()
+        backup.addWidget(b_exp)
+        backup.addWidget(b_imp)
+        backup.addStretch()
+        storage_layout.addLayout(backup)
+        storage_layout.addStretch()
+        self.viewLayout.addWidget(navigation(self, [
+            ('扫描目录', folders), ('识别选项', recognition), ('隔离与配置', storage)]), 1)
 
         self.yesButton.setText("保存")
         self.cancelButton.setText("关闭")
-        self.widget.setMinimumWidth(640)
+        self.widget.setMinimumWidth(880)
         from workbench_ui import style_dialog
         style_dialog(self)
 
@@ -3029,6 +3085,7 @@ class ConfigDialog(MessageBoxBase):
         self.sim_threshold.setValue(int(cfg['phash']['threshold']))
         self.ocr_scope.setCurrentIndex(int(bool(cfg['ocr']['full_image_if_nothing'])))
         self.cb_workers.setCurrentIndex(max(0, min(15, int(cfg['workers']) - 1)))
+        self.quarantine_path.setText(cfg.get('quarantine_dir', ''))
 
     def _form_config(self):
         data = copy.deepcopy(self.cfg)
@@ -3039,7 +3096,29 @@ class ConfigDialog(MessageBoxBase):
         data['ocr']['full_image_if_nothing'] = self.ocr_scope.currentIndex() == 1
         data['phash'].update(enabled=self.cb_sim.isChecked(), threshold=self.sim_threshold.value())
         data['workers'] = self.cb_workers.currentIndex() + 1
+        data['quarantine_dir'] = self.quarantine_path.text().strip()
         return data
+
+    def _choose_quarantine(self):
+        directory = QFileDialog.getExistingDirectory(self, '选择隔离目录', self.quarantine_path.text())
+        if directory:
+            self.quarantine_path.setText(directory)
+
+    @staticmethod
+    def _validate_quarantine(data):
+        raw = data.get('quarantine_dir', '')
+        if not isinstance(raw, str):
+            raise ValueError('隔离目录须为路径文本')
+        if not raw.strip():
+            data['quarantine_dir'] = ''
+            return
+        directory = Path(raw.strip()).expanduser()
+        if not directory.is_absolute():
+            raise ValueError('请选择完整的隔离目录路径')
+        directory = directory.resolve()
+        if directory == Path(directory.anchor) or (directory.exists() and not directory.is_dir()):
+            raise ValueError('请选择一个文件夹作为隔离目录，不能使用磁盘根目录或文件')
+        data['quarantine_dir'] = str(directory)
 
     def _add(self):
         d = QFileDialog.getExistingDirectory(self, "选择要扫描的文件夹")
@@ -3110,6 +3189,13 @@ class ConfigDialog(MessageBoxBase):
             for key in ('strip_ratio', 'max_dim', 'score_high', 'score_low'):
                 if float(merged['ocr'][key]) <= 0:
                     raise ValueError(f'OCR 参数 {key} 须大于 0')
+            self._validate_quarantine(merged)
+            locations = merged.get('quarantine_locations', [])
+            if not isinstance(locations, list) or not all(isinstance(p, str) and Path(p).is_absolute() for p in locations):
+                raise ValueError('隔离区历史目录须为完整路径列表')
+            old = str(self.app._quarantine_root())
+            merged['quarantine_locations'] = list(dict.fromkeys(
+                self.cfg.get('quarantine_locations', []) + locations + [old]))
         except Exception as e:
             InfoBar.error(title="导入失败", content=str(e),
                           orient=Qt.Horizontal, isClosable=True,
@@ -3126,8 +3212,19 @@ class ConfigDialog(MessageBoxBase):
 
     def validate(self):
         roots = [self.folder_list.item(i).data(Qt.UserRole) for i in range(self.folder_list.count())]
-        self.app._roots = [r for r in roots if r]
         data = self._form_config()
+        try:
+            self._validate_quarantine(data)
+        except ValueError as e:
+            self.navigation.setCurrentRow(2)
+            self.app._info('隔离目录无效', str(e))
+            return False
+        old = str(self.app._quarantine_root())
+        known = list(self.cfg.get('quarantine_locations', []))
+        if old not in known:
+            known.append(old)
+        data['quarantine_locations'] = known
+        self.app._roots = [r for r in roots if r]
         self.cfg.clear()
         self.cfg.update(data)
         af.save_config(self.cfg)
@@ -3138,14 +3235,14 @@ class ConfigDialog(MessageBoxBase):
 
 
 # ================================================================ 规则编辑（精简版）
-class RuleEditorLite(MessageBoxBase):
+class RuleEditorLite(WorkbenchDialog):
     """规则管理：文件名 / OCR 词库 / 白名单，Pivot 切换（currentItemChanged 驱动）。"""
 
     def __init__(self, parent, cfg_ref):
         super().__init__(parent)
         self.cfg = cfg_ref
         self.show_errors = True
-        self.widget.setFixedWidth(820)
+        self.widget.setFixedWidth(960)
 
         self.viewLayout.addWidget(SubtitleLabel("规则管理", self.widget))
         tip = CaptionLabel("双击单元格编辑；保存时校验正则与权重。规则变更后下次扫描自动全量重判。",
@@ -3166,12 +3263,19 @@ class RuleEditorLite(MessageBoxBase):
             self.pivot.addItem(routeKey=key, text=pg["label"])
         self.pivot.currentItemChanged.connect(
             lambda k: self.stack.setCurrentWidget(self._pages[k]["page"]))
-        self.viewLayout.addWidget(self.pivot)
-        self.viewLayout.addWidget(self.stack)
+        from dialog_ui import navigation
+        self.pivot.hide()  # 保留既有自动化与快捷切页接口
+        body = navigation(self, [(pg['label'], pg['page']) for pg in self._pages.values()])
+        self.stack.hide()
+        self.stack = self.page_stack
+        keys = list(self._pages)
+        self.navigation.currentRowChanged.connect(lambda row: self.pivot.setCurrentItem(keys[row]))
+        self.pivot.currentItemChanged.connect(lambda key: self.navigation.setCurrentRow(keys.index(key)))
+        self.viewLayout.addWidget(body, 1)
 
         self.yesButton.setText("保存规则")
         self.cancelButton.setText("关闭")
-        self.widget.setMinimumWidth(820)
+        self.widget.setMinimumWidth(960)
         from workbench_ui import style_dialog
         style_dialog(self)
 
@@ -3371,12 +3475,12 @@ class RuleEditorLite(MessageBoxBase):
 
 
 # ================================================================ 扫描历史
-class HistoryDialog(MessageBoxBase):
+class HistoryDialog(WorkbenchDialog):
     """扫描历史：时间 / 文件夹 / 总数 / 命中 / 耗时（引擎侧 ad_filter_history.json）。"""
 
     def __init__(self, app):
         super().__init__(app)
-        self.widget.setFixedWidth(680)
+        self.widget.setFixedWidth(960)
         self.viewLayout.addWidget(SubtitleLabel("扫描历史", self.widget))
         tip = CaptionLabel("最近 100 次扫描（新的在前）。规则变化后命中率的变化可在这里对比。", self.widget)
         tip.setWordWrap(True)
@@ -3384,6 +3488,11 @@ class HistoryDialog(MessageBoxBase):
 
         from PySide6.QtWidgets import QHeaderView, QTableWidgetItem
         hist = list(reversed(af.load_history()))
+        self.search = SearchLineEdit(self)
+        self.search.setPlaceholderText('搜索时间或扫描目录')
+        self.viewLayout.addWidget(self.search)
+        summary = CaptionLabel(f'共 {len(hist)} 次扫描   ·   累计扫描 {sum(h.get("total", 0) for h in hist):,} 张图片', self)
+        self.viewLayout.addWidget(summary)
         t = TableWidget(self.widget)
         t.setColumnCount(5)
         t.setHorizontalHeaderLabels(["时间", "文件夹", "扫描总数", "命中（广/疑/异）", "耗时"])
@@ -3394,7 +3503,8 @@ class HistoryDialog(MessageBoxBase):
         t.setEditTriggers(QAbstractItemView.NoEditTriggers)
         t.setSelectionBehavior(QAbstractItemView.SelectRows)
         t.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        t.setColumnWidth(0, 150)
+        t.setWordWrap(False)
+        t.setColumnWidth(0, 180)
         t.setColumnWidth(2, 90)
         t.setColumnWidth(3, 150)
         t.setColumnWidth(4, 76)
@@ -3409,29 +3519,50 @@ class HistoryDialog(MessageBoxBase):
             t.setItem(r, 4, QTableWidgetItem(f"{dur:.1f}s" if isinstance(dur, (int, float)) else str(dur)))
         t.setMinimumHeight(300)
         self.table = t
+        self.search.textChanged.connect(self._filter)
         self.viewLayout.addWidget(t)
         if not hist:
             self.viewLayout.addWidget(CaptionLabel("还没有扫描记录，跑一次扫描后这里会出现历史。", self.widget))
         self.yesButton.setVisible(False)
         self.cancelButton.setText("关闭")
-        self.widget.setMinimumWidth(680)
+        self.widget.setMinimumWidth(960)
         from workbench_ui import style_dialog
         style_dialog(self)
 
+    def _filter(self, text):
+        query = text.strip().casefold()
+        for row in range(self.table.rowCount()):
+            self.table.setRowHidden(row, not any(query in self.table.item(row, col).text().casefold()
+                                                 for col in (0, 1)))
+
 
 # ================================================================ 隔离区管理
-class QuarantineDialog(MessageBoxBase):
+class QuarantineDialog(WorkbenchDialog):
     """隔离区条目管理：查看 / 还原选中 / 彻底删除选中 / 全部还原。"""
 
     def __init__(self, app, q_root: Path):
         super().__init__(app)
         self.app = app
         self.q_root = q_root
-        self.widget.setFixedWidth(760)
+        self.widget.setFixedWidth(960)
         self.viewLayout.addWidget(SubtitleLabel("隔离区管理", self.widget))
         self.lbl_path = CaptionLabel(str(q_root), self.widget)
         self.lbl_path.setWordWrap(True)
         self.viewLayout.addWidget(self.lbl_path)
+
+        pathrow = QHBoxLayout()
+        self.locations = ComboBox(self)
+        known = list(dict.fromkeys([str(q_root)] + app.cfg.get('quarantine_locations', [])))
+        self.locations.addItems(known)
+        self.locations.setMinimumWidth(200)
+        self.locations.currentTextChanged.connect(self._switch_location)
+        self.btn_browse = PushButton('打开其他隔离区…', self)
+        self.btn_browse.clicked.connect(self._browse_location)
+        pathrow.addWidget(self.locations, 1)
+        pathrow.addWidget(self.btn_browse)
+        self.viewLayout.addLayout(pathrow)
+        self.selection_info = CaptionLabel('请选择需要还原或删除的文件', self)
+        self.viewLayout.addWidget(self.selection_info)
 
         from PySide6.QtWidgets import QHeaderView, QTableWidgetItem
         self._QTI = QTableWidgetItem
@@ -3445,11 +3576,13 @@ class QuarantineDialog(MessageBoxBase):
         t.setEditTriggers(QAbstractItemView.NoEditTriggers)
         t.setSelectionBehavior(QAbstractItemView.SelectRows)
         t.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        t.setColumnWidth(0, 200)
-        t.setColumnWidth(2, 140)
-        t.setColumnWidth(3, 76)
+        t.setWordWrap(False)
+        t.setColumnWidth(0, 160)
+        t.setColumnWidth(2, 160)
+        t.setColumnWidth(3, 110)
         t.setMinimumHeight(300)
         self.table = t
+        t.itemSelectionChanged.connect(self._selection_changed)
         self.viewLayout.addWidget(t)
 
         row = QHBoxLayout()
@@ -3468,10 +3601,33 @@ class QuarantineDialog(MessageBoxBase):
 
         self.yesButton.setVisible(False)
         self.cancelButton.setText("关闭")
-        self.widget.setMinimumWidth(760)
+        self.widget.setMinimumWidth(960)
         from workbench_ui import style_dialog
         style_dialog(self)
         self.reload()
+
+    def _switch_location(self, directory):
+        if directory and not self.app._file_busy:
+            self.q_root = Path(directory)
+            self.reload()
+
+    def _browse_location(self):
+        directory = QFileDialog.getExistingDirectory(self, '打开已有隔离区（含 manifest.json）', str(self.q_root))
+        if directory:
+            if not (Path(directory) / 'manifest.json').exists():
+                self.app._info('无法打开隔离区', '所选目录中没有隔离清单 manifest.json。')
+                return
+            if self.locations.findText(directory) < 0:
+                self.locations.addItem(directory)
+            self.locations.setCurrentText(directory)
+
+    def _selection_changed(self):
+        count = len({i.row() for i in self.table.selectedIndexes()})
+        self.selection_info.setText(f'共 {self.table.rowCount()} 项   ·   已选 {count} 项')
+        busy = self.app._file_busy
+        self.btn_rs.setEnabled(bool(count) and not busy)
+        self.btn_dl.setEnabled(bool(count) and not busy)
+        self.btn_ra.setEnabled(bool(self.table.rowCount()) and not busy)
 
     def reload(self):
         self.entries = af.list_quarantine(self.q_root)
@@ -3486,6 +3642,9 @@ class QuarantineDialog(MessageBoxBase):
             t.setItem(r, 2, self._QTI(e.get("time", "")))
             t.setItem(r, 3, self._QTI("已隔离" if e.get("exists") else "文件丢失"))
         self.lbl_path.setText(f"{self.q_root}   ·   {len(self.entries)} 项")
+        for b in (self.locations, self.btn_browse, self.btn_rf):
+            b.setEnabled(not self.app._file_busy)
+        self._selection_changed()
 
     def _selected_dsts(self):
         rows = {i.row() for i in self.table.selectedIndexes()}
@@ -3496,7 +3655,7 @@ class QuarantineDialog(MessageBoxBase):
             return
         self.app._file_busy = True
         self.app._sync_actions()
-        for b in (self.btn_rs, self.btn_dl, self.btn_ra):
+        for b in (self.btn_rs, self.btn_dl, self.btn_ra, self.locations, self.btn_browse, self.btn_rf):
             b.setEnabled(False)
 
         def work():

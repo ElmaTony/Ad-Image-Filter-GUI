@@ -10,7 +10,7 @@
 from PySide6.QtCore import (QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRect, QRectF,
                             Qt, QTimer, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPen,
-                           QPixmap)
+                           QPixmap, QShortcut, QKeySequence)
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QPushButton, QSizePolicy,
                                QStyledItemDelegate, QToolTip, QVBoxLayout, QWidget)
@@ -536,30 +536,52 @@ class CDSCommandPalette(QWidget):
         self.cmds = commands          # [(显示名, 回调), ...]
         self.dark = True
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.setWindowFlags(Qt.Widget)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 10, 10, 10)
-        lay.setSpacing(8)
+        lay.setContentsMargins(16, 16, 16, 12)
+        lay.setSpacing(12)
+        header = QHBoxLayout()
+        title = QLabel('快捷命令', self)
+        title.setFont(_font(14, True))
+        header.addWidget(title)
+        header.addStretch()
+        close = QPushButton('×', self)
+        close.setAccessibleName('关闭命令面板')
+        close.setFixedSize(28, 28)
+        close.clicked.connect(self.close)
+        header.addWidget(close)
+        lay.addLayout(header)
         self.edit = QLineEdit(self)
         self.edit.setPlaceholderText("输入命令…（Esc 关闭）")
         self.edit.setFixedHeight(T.H_MD)
         self.edit.textChanged.connect(self._filter)
         self.edit.returnPressed.connect(self._run_current)
+        self.edit.installEventFilter(self)
         lay.addWidget(self.edit)
         self.list = QListWidget(self)
         self.list.setFrameShape(QListWidget.NoFrame)
         self.list.itemActivated.connect(lambda _i: self._run_current())
         lay.addWidget(self.list)
+        hint = QLabel('↑ ↓ 选择    Enter 执行    Esc 关闭', self)
+        hint.setObjectName('commandHint')
+        lay.addWidget(hint)
+        self._escape = QShortcut(QKeySequence('Esc'), self)
+        self._escape.setContext(Qt.WidgetWithChildrenShortcut)
+        self._escape.activated.connect(self.close)
         self._filter("")
         self.refresh_theme(True)
-        self.resize(520, 380)
+        self.resize(540, 430)
         self.edit.setFocus()
 
     def refresh_theme(self, dark: bool):
         self.dark = dark
         self.setStyleSheet(
             f"CDSCommandPalette {{ background: {T.c(dark, TT.surface2)};"
-            f" border: 1px solid {T.c(dark, TT.border)}; border-radius: {T.R_XL}px; }}")
+            f" border: 1px solid {T.c(dark, TT.border)}; border-radius: {T.R_XL}px; }}"
+            f"QLabel {{ color:{T.c(dark, TT.text)}; background:transparent; }}"
+            f"QLabel#commandHint {{ color:{T.c(dark, TT.text_2)}; font-size:11px; }}"
+            f"QPushButton {{ color:{T.c(dark, TT.text_2)}; border:none; border-radius:6px; }}"
+            f"QPushButton:hover {{ background:{T.c(dark, TT.clay_fill)}; }}")
         self.edit.setStyleSheet(
             f"QLineEdit {{ background: {T.c(dark, TT.surface3)}; border: 1px solid {T.c(dark, TT.border)};"
             f" border-radius: {T.R_MD}px; padding: 0 10px; color: {T.c(dark, TT.text)}; }}")
@@ -597,12 +619,24 @@ class CDSCommandPalette(QWidget):
         else:
             super().keyPressEvent(e)
 
+    def eventFilter(self, watched, event):
+        if watched is self.edit and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Escape:
+                self.close()
+                return True
+            if event.key() in (Qt.Key_Up, Qt.Key_Down):
+                self.list.keyPressEvent(event)
+                return True
+        return super().eventFilter(watched, event)
+
     @classmethod
     def popup(cls, parent, commands):
         p = cls(parent, commands)
         p.refresh_theme(getattr(parent, 'theme', 'light') == 'dark')
-        p.move(parent.x() + (parent.width() - p.width()) // 2, parent.y() + 96)
+        p.move((parent.width() - p.width()) // 2, 96)
         p.show()
+        p.raise_()
+        p.edit.setFocus(Qt.ShortcutFocusReason)
         return p
 
 
