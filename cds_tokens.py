@@ -41,11 +41,11 @@ class T:
 
     # —— Surface 阶梯（深色全程偏暖：R ≥ G > B，见 1.1b）——
     # —— Surface Ladder（C：cds-theme.css 原文）——
-    root_bg     = _t("#F6F4EF", "#121212")   # 应用根背景
-    surface0    = _t("#F9F9F7", "#0B0B0B")   # 侧边栏 / 根底
-    surface1    = _t("#FCFCFB", "#151515")   # 主聊天画布
-    surface2    = _t("#FFFFFF", "#1A1A19")   # 卡片 / 消息容器
-    surface3    = _t("#FFFFFF", "#20201F")   # 输入框 / 浮层
+    root_bg     = _t("#F4F2EE", "#171716")   # 暖陶工作台底色
+    surface0    = _t("#FCFBF9", "#20201E")   # 工具和详情表面
+    surface1    = _t("#F4F2EE", "#171716")   # 图片墙
+    surface2    = _t("#FFFFFF", "#292927")   # 卡片
+    surface3    = _t("#FCFBF9", "#20201E")   # 输入框 / 浮层
     popover     = _t("#FFFFFF", "#2C2C2A")   # 浮层专用
     sidebar     = _t("#F5F5F3", "#181818")   # 侧栏专用（A）
     header      = _t("#FCFCFB", "#1E1E1E")   # 顶栏专用（A）
@@ -55,13 +55,13 @@ class T:
     flat_composer = _t("#FFFFFF", "#20201E") # 输入区外壳
 
     # —— 文本 ——
-    text        = _t("#2A2724", "#F5F4F2")   # 主文本（B：HSL 36 25% 4% / 40 8% 93%）
-    text_2      = _t("#6B6863", "#A8A29A")   # 次级（灰阶 500 / 暖灰）
-    text_3      = _t("#A4A19B", "#6E6B66")   # 三级 / 占位符
+    text        = _t("#302D29", "#EEECE6")
+    text_2      = _t("#716C65", "#AAA59C")
+    text_3      = _t("#827C73", "#928D84")   # 小字号仍保持可读
     text_on_clay = _t("#FFFFFF", "#FFFFFF")
 
     # —— 边框 / 分隔线 ——
-    border       = _t("#E5E1DA", "#2E2C2A")  # alpha2：1px 基础边框
+    border       = _t("#E5E0D8", "#363632")
     border_strong = _t("rgba(0,0,0,0.20)", "rgba(255,255,255,0.18)")  # alpha3：hover / 激活
     border_soft  = _t("#EFEDE8", "#262524")  # alpha1：更弱的分隔
     # 灰阶层级（10 级暖灰，供文字/底/边框取用；避免"只有一个橙"）
@@ -72,7 +72,7 @@ class T:
     border_clay = _t("rgba(217,119,87,0.26)", "rgba(217,119,87,0.30)")
 
     # —— 品牌（动作 / 选中 / 品牌标记专用；判定色不得复用它）——
-    clay        = _t("#C6613F", "#E08264")
+    clay        = _t("#B85E3F", "#E19676")
 
     # —— 填充 ——
     muted       = _t("#F1EFEA", "#232221")   # muted / accent 底

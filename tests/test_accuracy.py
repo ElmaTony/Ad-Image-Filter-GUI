@@ -153,3 +153,4 @@ spec = tn/len(neg)*100
 print(f"\n召回率 {tp}/{len(pos)} = {recall:.1f}%   误报 {fp}/{len(neg)} = {100-spec:.1f}%   特异度 {spec:.1f}%", flush=True)
 cache.conn.close()
 shutil.rmtree(td, ignore_errors=True)
+sys.exit(1 if fn or fp else 0)

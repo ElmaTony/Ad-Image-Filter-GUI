@@ -15,6 +15,7 @@ dist/
 *.spec
 __pycache__/
 *.pyc
+.venv/
 
 # ---- 测试样本 ----
 # 合成样本可由 `python ad_filter.py --make-fixtures` 重新生成；

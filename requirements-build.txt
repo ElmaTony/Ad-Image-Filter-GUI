@@ -1,0 +1,6 @@
+-r requirements.txt
+# 本次发行验证使用的 Qt / 图像依赖，避免构建时隐式切换 Qt 大版本。
+PySide6==6.8.3
+Pillow==11.3.0
+opencv-python==4.12.0.88
+pyinstaller==6.22.3

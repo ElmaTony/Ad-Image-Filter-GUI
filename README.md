@@ -4,7 +4,14 @@
 
 ## 界面与交互
 
-单一布局，没有侧栏和多余的骨架：**顶栏（全部功能入口）+ 图片墙 + 右侧详情面板 + 底部处置条**。深浅双主题。
+**暖陶工作台**：暖灰底色、陶土橙主色，深浅双主题。顶栏提供扫描、规则、设置、历史、隔离区与命令入口；图片墙采用分行筛选和可见的批量选择工具；右侧详情可拖动调宽；底部集中展示处置范围，状态和日志另行分层。
+
+![暖陶工作台浅色界面](docs/screenshots/workbench-light.png)
+
+- “全部待审”包含广告、疑似、异常，三类可以独立筛选。
+- 底栏显示全局已选数量、大小和筛选外隐藏数量；三个可见处置选项对应明确的执行按钮文案。
+- “标记广告”表示加入待处置；“本次保留”仅移出本次结果，不写白名单。
+- 设置支持相似距离阈值，导入配置后同步全部控件；详情保留完整已保存的 OCR 文本。
 
 - 图片墙：缩略图卡片网格，单击看详情，空格/点圈勾选，`←` `→` 翻页，双击进画廊查看器（滚轮缩放 / 拖拽平移 / 双击 1.25×）
 - 详情面板：大图预览（按面板尺寸自适应）、判定/分数/命中原因/OCR 文本、标记广告 / 保留
@@ -16,7 +23,7 @@
 ## 识别能力（四种信号，可独立开关）
 
 1. **文件名规则**——正则匹配（渠道号、推广词等，可自定义）
-2. **形状规则**——极端长宽比 / 过小分辨率（只读文件头，不解码）
+2. **形状规则**——极端横条 / 过小分辨率提示疑似（只读文件头，不直接判定广告）
 3. **二维码**——**pyzbar 主解码**（带 logo/低清的艺术码也能解出链接），OpenCV 图形检测兜底；含链接直接判广告，仅见图形记疑似
 4. **OCR 文字**——RapidOCR 本地模型；上下条带裁切 + 原图识别 + 提亮增强 + 全图兜底，按推广词库加权计分（≥6 广告、≥3 疑似）
 
@@ -54,7 +61,7 @@ cd ad-filter-gui
 pip install -r requirements.txt
 ```
 
-依赖：PySide6、PyQt-Fluent-Widgets、qframelesswindow、Pillow、OpenCV、**pyzbar**、RapidOCR、send2trash。
+依赖：PySide6、PySide6-Fluent-Widgets、PySideSix-Frameless-Window、Pillow、OpenCV、**pyzbar**、RapidOCR、send2trash。Fluent 组件须使用 [PySide6 对应版本](https://qfluentwidgets.com/pages/install/)。
 
 ## 快速开始
 
@@ -77,13 +84,13 @@ python ad_filter.py --gui-test      # GUI 功能自测（126 项断言）
 ```
 文件收集（跳过隔离目录）
   ├─ 1. 文件名正则 → 直接判 ad
-  ├─ 2. 只读图片头：极端长宽比 → ad；最小边过小 → 疑似
+  ├─ 2. 只读图片头：极端横条记疑并继续找内容；最小边过小 → 疑似
   └─ 3. 需要像素时（前两级未命中）：
         ├─ 纯空白图 → 直接放行（跳过后续识别）
         ├─ pyzbar 解码：含 t.me/http → ad；解不出 → OpenCV 图形检测 → 疑似
         └─ OCR：上/下条带拼接 → 原图识别 → 未达广告线则提亮重试
-             → 仍未命中且开了"全图兜底"：整图降到 1100px 再识别
-             → 加权计分：≥6 广告、≥3 疑似（词库可自定义）
+             → 未达广告高阈值且开了"全图兜底"：整图降到 1100px 再识别
+             → 加权计分：≥6 广告；其余词库命中记疑似（词库可自定义）
 ```
 
 - **逐级短路**：得分够广告线立即停止，不浪费推理
@@ -95,36 +102,49 @@ python ad_filter.py --gui-test      # GUI 功能自测（126 项断言）
 | 层级 | 命令 | 说明 |
 |---|---|---|
 | 引擎自测 | `python ad_filter.py --selftest` | 无需 GUI，合成 fixture |
-| GUI 功能自测 | `python ad_filter.py --gui-test` | 126 项断言，真实窗口平台 |
-| UI 元素审查 | `python tests/audit_ui.py` | 48 项几何/颜色断言（深浅主题） |
+| GUI 功能自测 | `python ad_filter.py --gui-test` | 131 项断言 |
+| 工作台回归 | `python tests/test_workbench.py` | 9 个用例，覆盖隐藏选择、导入同步、临时目录处置等 |
+| UI 元素审查 | `python tests/audit_ui.py` | 72 项几何/颜色断言，深浅主题与三个窗口尺寸 |
 | 端到端 | `python tests/test_e2e.py` | 37 项完整操作链 |
-| 精度 | `python tests/test_accuracy.py` | 8 类广告 + 6 类干扰负样本，召回/误报统计 |
+| 精度 | `python tests/test_accuracy.py` | 6 类广告 + 6 类干扰负样本，共 44 张合成图片 |
 
-> 说明：`--gui-test`、`--selftest`、`audit_ui.py` 使用合成样本，**任何机器克隆后可直接运行**；`test_e2e.py` 与 `test_accuracy.py` 的部分用例需要本地真实样本（`testdata/real*`，属个人数据，**不随仓库分发**），换机器前请自备或跳过。
+> GUI 测试可设 `QT_QPA_PLATFORM=offscreen` 在离屏平台运行，界面截图使用本机字体。`test_e2e.py` 需要 `testdata/real4_*`、`real6_*`，这些个人样本不随仓库分发；其余合成测试可在安装依赖后运行。文件处置测试已固定到专用临时隔离区。
 
 ## 项目结构
 
 ```
 ad_filter.py          # 识别引擎 + CLI（--selftest/--gui-test/--bench/--make-fixtures）
 ad_filter_gui.py      # GUI 主程序（图片墙/详情/处置/弹窗/测试）
+workbench_ui.py       # 暖陶工作台视图和配套窗口主题
 cds_tokens.py         # 设计令牌（色彩/尺寸/语义色体系）
 cds_widgets.py        # 通用组件（Toast/命令面板/骨架屏等）
 cds_layouts.py        # 主区布局管理（无侧栏，单形态）
 build-exe.txt         # 打包脚本（自动复制到根目录并清理 dist/build/spec）
+scripts/              # 可复用的打包、清理和 GitHub Release 发布脚本
 tests/                # 测试套件（见上表）
 assets/               # 主题图标资源
 ```
 
 ## 构建 exe
 
-完整命令见 `build-exe.txt`（含 pyzbar/cds_* 的 collect/hidden-import 与体积裁剪排除清单）。产物约 175MB，onefile 首次启动需解压 5–10 秒。脚本结束后自动把 exe 复制到项目根目录并删除 `dist/`、`build/`、`.spec`，不产生重复产物。
+推荐使用项目虚拟环境和构建脚本：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
+```
+
+产物为根目录 `广告图过滤.exe`。构建成功后自动清理 `dist/`、`build/`、`.spec` 和源码字节码缓存，保留用户数据与依赖环境。单文件首次运行会先解压依赖。
+
+每次更新必须测试、打包、清理、推送源码并上传 GitHub Release，约定见 `AGENTS.md`。提交源码后，使用已登录的 GitHub CLI 执行 `scripts/publish.ps1 -Tag <版本> -Title <标题> -NotesFile RELEASE_NOTES.md`；发布脚本会推送当前提交并上传 EXE。
 
 ## 隐私声明
 
 - 所有扫描、OCR、聚类均在本地完成，**无任何网络请求**
-- 隔离目录位于各扫描根盘的 `_广告隔离/`，`manifest.json` 记录原始路径用于恢复
+- 默认隔离目录位于首个导入文件夹所在盘根目录的 `_广告隔离/`，确认时显示实际位置；`manifest.json` 记录原始路径用于恢复
 - 操作日志仅写在本地 `ad_filter_log.jsonl`
-- `testdata/` 中的真实样本、缓存、配置、历史、日志、exe 均被 `.gitignore` 排除，不上传
+- `testdata/` 中的真实样本、缓存、配置、历史、日志均不进入仓库；EXE 仅作为发行版附件上传
 
 ## License
 

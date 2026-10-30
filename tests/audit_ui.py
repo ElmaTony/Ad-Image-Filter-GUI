@@ -8,6 +8,8 @@
 """
 import sys
 import time
+import tempfile
+import shutil
 from pathlib import Path
 
 sys.argv = ["audit"]
@@ -34,8 +36,22 @@ def check(name, cond, detail=""):
 
 
 def main():
+    temp = Path(tempfile.mkdtemp(prefix='ad_ui_audit_'))
+    original_paths = af.CACHE_PATH, af.CONFIG_PATH, af.LOG_PATH, af.HISTORY_PATH
+    af.CACHE_PATH, af.CONFIG_PATH = temp / 'cache.db', temp / 'config.json'
+    af.LOG_PATH, af.HISTORY_PATH = temp / 'log.jsonl', temp / 'history.json'
+    af.CONFIG_PATH.write_text('{"ui_theme":"light","ocr":{"enabled":false},"qr":{"enabled":false},"phash":{"enabled":false}}', encoding='utf-8')
+    from PIL import Image, ImageDraw
+    source = temp / 'photos'
+    source.mkdir()
+    for i in range(5):
+        im = Image.new('RGB', (1000, 700), (180 + i * 8, 187, 168))
+        draw = ImageDraw.Draw(im)
+        draw.polygon([(0, 550), (230, 170), (430, 470), (770, 240), (1000, 550), (1000, 700), (0, 700)], fill=(79, 113, 100))
+        im.save(source / f'推广图_{i}.jpg')
     qapp = QApplication([])
     app = g.run_gui(return_app=True)
+    app._quarantine_override = temp / 'quarantine'
     app._toast = lambda *a, **k: None
     app.show()
     app.resize(1440, 900)
@@ -47,15 +63,18 @@ def main():
             time.sleep(0.02)
 
     def shot(name):
+        original_path = app.detail_path.text()
+        app.detail_path.setText('D:\\图片\\演示相册\\推广图_0.jpg')
         img = QImage(app.width(), app.height(), QImage.Format_ARGB32_Premultiplied)
         app.render(img)
+        app.detail_path.setText(original_path)
         img.save(str(OUT / f"{name}.png"))
         return img
 
     pump(1.0)
     dark0 = isDarkTheme()          # 记住启动主题，结束时还原
     # 扫 testdata 出结果（缓存秒开）
-    app.add_folders([str(ROOT / "testdata")])
+    app.add_folders([str(source)])
     app.start_scan()
     t0 = time.time()
     while time.time() - t0 < 60:
@@ -83,6 +102,22 @@ def main():
         audit(app, theme, "workbench", check, shot, pump)
         if dark:
             shot(f"audit-{theme}-extra")  # 语义色像素断言用
+            app.seg_disposal.set_index(2)
+            shot('audit-dark-delete')
+            app.seg_disposal.set_index(0)
+        for width, height in ((1080, 680), (1280, 800)):
+            app.resize(width, height)
+            pump(.4)
+            check(f'[{theme}/{width}] 窗口未被内容撑大', app.width() == width and app.height() == height,
+                  f'{app.width()}x{app.height()}')
+            for name in ('top_bar', 'filter_bar', 'bot', 'footer', 'detail'):
+                panel = getattr(app, name)
+                r = panel.rect()
+                point = panel.mapTo(app, r.bottomRight())
+                check(f'[{theme}/{width}] {name} 在窗内', point.x() < app.width() and point.y() < app.height())
+            shot(f'audit-{theme}-{width}')
+        app.resize(1440, 900)
+        pump(.3)
 
     # 语义色像素断言（深色 gallery 截图）
     verify_colors(OUT, check)
@@ -93,6 +128,9 @@ def main():
         pump(0.5)
     app.close()
     qapp.processEvents()
+    app._cache.conn.close()
+    af.CACHE_PATH, af.CONFIG_PATH, af.LOG_PATH, af.HISTORY_PATH = original_paths
+    shutil.rmtree(temp, ignore_errors=True)
 
     passed = sum(1 for _, ok in results if ok)
     print(f"\nUI 审查：{passed}/{len(results)} 通过" + ("" if passed == len(results) else " ❌"))
@@ -114,11 +152,9 @@ def audit(app, theme, mode, check, shot, pump):
 
     # —— 顶栏 ——
     top = app.top_bar
-    check(f"[{tag}] 顶栏高 52", top.height() == 52, f"h={top.height()}")
+    check(f"[{tag}] 顶栏高 58", top.height() == 58, f"h={top.height()}")
     check(f"[{tag}] 扫描钮 112x32", app.btn_scan.width() == 112 and app.btn_scan.height() == 32)
-    check(f"[{tag}] 状态胶囊在主题钮左侧",
-          app.status_pill.mapTo(app, app.status_pill.rect().topRight()).x()
-          <= app.btn_theme.mapTo(app, app.btn_theme.rect().topLeft()).x() + 20)
+    check(f"[{tag}] 状态在底部独立状态栏", app.status_pill.parent() is app.footer)
     check(f"[{tag}] 状态胶囊高≤30", app.status_pill.height() <= 30, f"h={app.status_pill.height()}")
     # 状态文字色 = 语义色（当前是「扫描完成」= 绿 / 或就绪 = 灰）
     role = getattr(app, "_status_role", "gray")
@@ -126,10 +162,10 @@ def audit(app, theme, mode, check, shot, pump):
 
     # —— 筛选条 ——
     fb = app.filter_bar
-    check(f"[{tag}] 筛选条高 46", fb.height() == 46, f"h={fb.height()}")
+    check(f"[{tag}] 筛选条分行高 144", fb.height() == 144, f"h={fb.height()}")
     for w in (app.f_verdict, app.f_reason, app.f_search, app.f_sort):
-        check(f"[{tag}] 筛选控件高30 ({w.__class__.__name__})", w.height() == 30, f"h={w.height()}")
-    check(f"[{tag}] 计数区不越界", app.lbl_count.mapTo(fb, app.lbl_count.rect().topRight()).x() <= fb.width())
+        check(f"[{tag}] 筛选控件高30或32 ({w.__class__.__name__})", w.height() in (30, 32), f"h={w.height()}")
+    check(f"[{tag}] 计数区在处置条内", app.lbl_count.mapTo(bot := app.bot, app.lbl_count.rect().topRight()).x() <= bot.width())
 
     # —— 网格卡片 ——
     check(f"[{tag}] 网格单元 204x242", app.grid.gridSize() == __import__("PySide6.QtCore", fromlist=["QSize"]).QSize(204, 242),
@@ -174,7 +210,7 @@ def audit(app, theme, mode, check, shot, pump):
         fm_w = dw.fontMetrics().horizontalAdvance(dw.text()) + dw.iconSize().width() + 24
         check(f"[{tag}] 执行处置宽度足够", dw.width() >= fm_w, f"w={dw.width()} need>={fm_w}")
     else:
-        check(f"[{tag}] 底栏停靠全宽", bot.width() >= W - 4 and bot.height() == 60,
+        check(f"[{tag}] 底栏停靠全宽", bot.width() >= W - 4 and bot.height() == 66,
               f"w={bot.width()} h={bot.height()}")
         bl = bot.layout()
         overflow = [bl.itemAt(i).widget().__class__.__name__
@@ -185,8 +221,8 @@ def audit(app, theme, mode, check, shot, pump):
 
     # —— 详情面板（workbench）——
     if mode == "workbench":
-        check(f"[{tag}] 详情宽 360", app.detail.width() == 360, f"w={app.detail.width()}")
-        check(f"[{tag}] 预览画布高≥180", app.preview.height() >= 180, f"h={app.preview.height()}")
+        check(f"[{tag}] 详情宽可调", 320 <= app.detail.width() <= 520, f"w={app.detail.width()}")
+        check(f"[{tag}] 预览画布高≥130", app.preview.height() >= 130, f"h={app.preview.height()}")
         check(f"[{tag}] 详情头徽标存在", app.detail_badge.text() != "", app.detail_badge.text())
         # 选中首项后徽标应为判定文字
         app.grid.setCurrentIndex(app.model.index(0))
@@ -211,7 +247,7 @@ def verify_colors(OUT, check):
     def load(name):
         return np.array(Image.open(OUT / f"{name}.png").convert("RGBA"))
 
-    img = load("audit-dark-workbench")
+    img = load("audit-dark-delete")
     H, W = img.shape[:2]
     # 执行处置按钮：底部停靠条（y≈H-60..H），红色 danger 系
     region = img[H - 90:H - 10, :]

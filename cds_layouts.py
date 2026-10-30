@@ -35,7 +35,8 @@ class LayoutManager:
         if mid is None:
             return
         app.detail.setVisible(True)
-        app.detail.setFixedWidth(T.DETAIL_W)
+        app.detail.setMinimumWidth(320)
+        app.detail.setMaximumWidth(520)
         self._dock_bottom(True)
         self.refresh_theme(getattr(app, "theme", "dark") == "dark")
 
@@ -64,7 +65,7 @@ class LayoutManager:
             pass
         bot.setStyleSheet(getattr(app, "_bot_css", ""))
         # 悬浮模式锁定过 56 高 / 胶囊宽——停靠必须还原，否则宽高被锁死
-        bot.setFixedHeight(60)
+        bot.setFixedHeight(66)
         bot.setMinimumWidth(0)
         bot.setMaximumWidth(16777215)
         bot.show()

@@ -408,7 +408,7 @@ class CDSToast(QFrame):
         t.adjustSize()
         y = host.height() - T.TOAST_MARGIN - t.height() - (len(cls._stack) - 1) * (t.height() + 8)
         t.move(host.width() - T.TOAST_MARGIN - t.width(), max(T.TOAST_MARGIN + 48, y))
-        t.show()
+        QFrame.show(t)
         QTimer.singleShot(T.TOAST_MS, t._fade_out)
         return t
 
@@ -600,6 +600,7 @@ class CDSCommandPalette(QWidget):
     @classmethod
     def popup(cls, parent, commands):
         p = cls(parent, commands)
+        p.refresh_theme(getattr(parent, 'theme', 'light') == 'dark')
         p.move(parent.x() + (parent.width() - p.width()) // 2, parent.y() + 96)
         p.show()
         return p

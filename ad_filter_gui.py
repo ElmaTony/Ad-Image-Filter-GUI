@@ -6,6 +6,8 @@
 主题：Claude 暖色（陶土橙 #d97757）
 """
 import json
+import copy
+import html
 import os
 import queue
 import re
@@ -68,6 +70,7 @@ class ThumbCache(QObject):
         self._max = max_items
         self._cache: "OrderedDict[str, QPixmap]" = OrderedDict()
         self._pending: set = set()
+        self._failed: set = set()
         self._lock = threading.Lock()
         self._q = queue.Queue()
         self._stopped = False
@@ -77,6 +80,8 @@ class ThumbCache(QObject):
 
     def get(self, path: str):
         with self._lock:
+            if path in self._failed:
+                return None
             if path in self._cache:
                 self._cache.move_to_end(path)
                 return self._cache[path]
@@ -134,6 +139,7 @@ class ThumbCache(QObject):
     def _mark_failed(self, path):
         with self._lock:
             self._pending.discard(path)
+            self._failed.add(path)
         self.ready.emit(path)
 
     def stop(self):
@@ -186,9 +192,9 @@ class CardDelegate(QStyledItemDelegate):
         self._f_name.setPixelSize(13)
         self._f_name.setWeight(QFont.DemiBold)
         self._f_reason = QFont("Microsoft YaHei UI")
-        self._f_reason.setPixelSize(11)
+        self._f_reason.setPixelSize(12)
         self._f_badge = QFont("Cascadia Mono", 8)   # 等宽数字（tabular-nums）
-        self._f_badge.setPixelSize(10)
+        self._f_badge.setPixelSize(11)
         self._f_badge.setBold(True)
         self._fm_name = QFontMetrics(self._f_name)
         self._fm_reason = QFontMetrics(self._f_reason)
@@ -249,18 +255,6 @@ class CardDelegate(QStyledItemDelegate):
             dark = (_t == "dark") if _t in ("dark", "light") else self.dark
         except Exception:
             dark = self.dark
-        # —— 临时诊断（用户连续报告"浅色主题下选中卡是黑的"，需真实运行数据）——
-        try:
-            if not getattr(self, "_dbg_once", False):
-                self._dbg_once = True
-                with open(r"F:\Project\ad-filter-gui\_paint_debug.log", "a",
-                          encoding="utf-8") as _f:
-                    _f.write(
-                        f"dark={dark} self.dark={self.dark} isDarkTheme={isDarkTheme()} "
-                        f"card={CDST.c(dark, CDSTT.surface2)} "
-                        f"winBg={self.parent().palette().color(QPalette.Window).name() if self.parent() else '?'}\n")
-        except Exception:
-            pass
         r = QRect(opt.rect).adjusted(5, 5, -5, -5)
         from PySide6.QtWidgets import QStyle
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)
@@ -391,9 +385,9 @@ class CardDelegate(QStyledItemDelegate):
             p.setPen(QPen(_qc(CDST.c(dark, CDSTT.text_on_clay)), 2))
             p.drawLine(cr.left() + 6, cr.center().y(), cr.center().x() - 1, cr.bottom() - 7)
             p.drawLine(cr.center().x() - 1, cr.bottom() - 7, cr.right() - 5, cr.top() + 7)
-        elif hovered:
-            p.setBrush(QColor(0, 0, 0, 80))
-            p.setPen(QPen(QColor(255, 255, 255, 150), 1.4))
+        else:
+            p.setBrush(_qc(CDST.c(dark, CDSTT.surface2)))
+            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.text_2)), 1.2))
             p.drawEllipse(cr)
         gi = self.model.sim_map.get(it["path"])
         if gi is not None:
@@ -465,25 +459,36 @@ class FolderBar(QWidget):
         super().__init__(parent)
         self.app = app
         self.setObjectName("folderBar")
-        self.setFixedHeight(42)
+        self.setFixedHeight(50)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 6, 14, 6)
         lay.setSpacing(8)
         self._chips: dict[str, QLabel] = {}
-        self._box = QHBoxLayout()
+        from PySide6.QtWidgets import QScrollArea
+        self._scroll = QScrollArea(self)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet('QScrollArea { background: transparent; border: none; }')
+        self._scroll.viewport().setStyleSheet('background: transparent;')
+        self._chip_host = QWidget(self._scroll)
+        self._box = QHBoxLayout(self._chip_host)
+        self._box.setContentsMargins(0, 0, 0, 0)
+        self._box.setAlignment(Qt.AlignLeft)
         self._box.setSpacing(6)
-        lay.addLayout(self._box)
-        lay.addStretch(1)
+        self._scroll.setWidget(self._chip_host)
+        lay.addWidget(self._scroll, 1)
         self.wave = WaveDots(self)
         self.wave.hide()
         self.lbl_current = QLabel("", self)
         self.lbl_current.setObjectName("currentFile")
-        self.lbl_current.setFixedWidth(300)
+        self.lbl_current.setFixedWidth(220)
         self.lbl_current.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lay.addWidget(self.wave)
         lay.addWidget(self.lbl_current)
         self.progress = ProgressBar(self)
-        self.progress.setFixedWidth(120)
+        self.progress.setFixedWidth(90)
         lay.addWidget(self.progress)
         self.lbl_pct = CaptionLabel("", self)
         self.lbl_pct.setFixedWidth(52)
@@ -529,7 +534,7 @@ class FolderBar(QWidget):
             fname = Path(cur_path).name
             text = f"正在扫描  {root_name}/{fname}" if root_name else f"正在扫描  {fname}"
             fm = QFontMetrics(self.lbl_current.font())
-            self.lbl_current.setText(fm.elidedText(text, Qt.ElideMiddle, 292))
+            self.lbl_current.setText(fm.elidedText(text, Qt.ElideMiddle, self.lbl_current.width() - 8))
             self.lbl_current.setToolTip(str(cur_path))
         else:
             self.wave.stop()
@@ -1204,7 +1209,7 @@ class ScrollFade(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, False)
 
     def paintEvent(self, _e):
-        base = QColor("#151515" if isDarkTheme() else "#fcfcfb")
+        base = QColor(CDST.c(isDarkTheme(), CDSTT.surface1))
         p = QPainter(self)
         p.setPen(Qt.NoPen)
         if self._edge == "top":
@@ -1275,10 +1280,12 @@ class App(FramelessWindow):
     _sig_preview_err = Signal(object)
 
     def __init__(self, cfg):
+        from workbench_ui import configure_fonts
+        configure_fonts()
         super().__init__()
         self.setObjectName("mainWindow")
         self.cfg = cfg
-        self.theme = cfg.get("ui_theme", "dark")
+        self.theme = cfg.get("ui_theme", "light")
         setTheme(Theme.DARK if self.theme == "dark" else Theme.LIGHT)
         scr = self.screen().availableGeometry() if self.screen() else None
         self.resize(min(1500, scr.width() - 80) if scr else 1460,
@@ -1297,6 +1304,10 @@ class App(FramelessWindow):
         self.similar_groups: list = []
         self._sim_map: dict = {}
         self._disposing = False
+        self._quarantine_override = None  # 测试注入临时隔离区，生产默认策略不变
+        self._scan_generation = 0
+        self._file_busy = False
+        self._cached_count = 0
         self.scan_q = queue.Queue()
         self.cancel = threading.Event()
         self.scan_thread = None
@@ -1351,7 +1362,7 @@ class App(FramelessWindow):
     def _apply_theme(self):
         """令牌驱动的主题 QSS。色彩分层原则：
         品牌橙只出现在「主动作 / 当前项 / 进度」；判定与状态一律走语义色；其余全用暖灰阶梯。"""
-        d = isDarkTheme()
+        d = self.theme == 'dark'
         TT = CDSTT
         root_bg = CDST.c(d, TT.root_bg)
         s0 = CDST.c(d, TT.surface0)
@@ -1377,13 +1388,19 @@ class App(FramelessWindow):
             #mainWindow {{ background: {root_bg}; }}
             /* 整窗统一底色（Claude 原则：靠留白与发丝分层，不做盒子套盒子）。
                顶/底/筛选/文件夹条全部透出根底色，只留一条极淡发丝。 */
-            #topBar {{ background: transparent; border-bottom: 1px solid {bdr_soft}; }}
-            #bottomBar {{ background: transparent; border-top: 1px solid {bdr_soft}; }}
+            #topBar {{ background: {s0}; border-bottom: none; }}
+            #bottomBar {{ background: {s0}; border-top: 1px solid {bdr}; }}
+            #footerBar {{ background: {root_bg}; }}
             #filterBar {{ background: transparent; border: none; }}
-            #detailPanel {{ background: transparent; border-left: 1px solid {bdr_soft}; }}
+            #detailPanel {{ background: {s0}; border-left: 1px solid {bdr}; }}
+            #sectionTitle {{ color: {txt}; font-size: 20px; font-weight: 600; }}
+            #detailFilename {{ color: {txt}; font-size: 13px; font-weight: 600; }}
+            #detailPath {{ color: {txt2}; font-size: 11px; }}
+            #workbenchSplitter::handle {{ background: {bdr}; }}
+            #grid {{ background: transparent; border: none; }}
             #detailHead {{ background: transparent; border-bottom: 1px solid {bdr_soft}; }}
             #gridWrap {{ background: transparent; }}
-            #folderBar {{ background: transparent; border-bottom: 1px solid {bdr_soft}; }}
+            #folderBar {{ background: {s0}; border-bottom: 1px solid {bdr}; }}
             /* 预览画布：图片需要边界，保留 surface2 + 发丝 + 圆角 12 */
             #previewCanvas {{ background: {s2}; border: 1px solid {bdr};
                 border-radius: {CDST.R_CARD}px; color: {txt3}; }}
@@ -1434,8 +1451,8 @@ class App(FramelessWindow):
 
     def _apply_brand_style(self):
         # 品牌在 TitleBar 内置（双色字 + 主题同步）
-        clay = "#e08264" if isDarkTheme() else "#c6613f"
-        base = "#f5f5f5" if isDarkTheme() else "#151515"
+        clay = CDST.c(isDarkTheme(), CDSTT.clay)
+        base = CDST.c(isDarkTheme(), CDSTT.text)
         self._titlebar.apply_theme(isDarkTheme(), clay, base)
 
     def _apply_log_bg(self):
@@ -1534,356 +1551,8 @@ class App(FramelessWindow):
 
     # ---------- UI ----------
     def _build(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 48, 0, 0)
-        root.setSpacing(0)
-        self._root_layout = root   # 布局管理器需要它做「底部条 停靠↔悬浮」切换
-
-        # 顶部工具栏 —— CDS 工具条：动作分组 + 1px 发丝分隔 + 右侧语义状态胶囊
-        top = QWidget(self)
-        top.setObjectName("topBar")
-        top.setFixedHeight(52)
-        tl = QHBoxLayout(top)
-        tl.setContentsMargins(14, 0, 12, 0)
-        tl.setSpacing(4)
-        self.top_bar = top
-        self.brand = self._titlebar.brand   # 品牌在标题栏正中（TitleBar 内）
-
-        # 组 1：扫描动作（品牌橙 = 主行动）
-        self.btn_add = TransparentPushButton(FIF.FOLDER_ADD, "添加文件夹", top)
-        self.btn_add.clicked.connect(self.add_folder)
-        tl.addWidget(self.btn_add)
-        self.btn_scan = PrimaryPushButton(FIF.PLAY, "开始扫描", top)
-        self.btn_scan.setFixedWidth(112)
-        self.btn_scan.setFixedHeight(32)
-        self.btn_scan.clicked.connect(self.start_scan)
-        tl.addWidget(self.btn_scan)
-        self.btn_pause = TransparentPushButton(FIF.PAUSE, "暂停", top)
-        self.btn_pause.clicked.connect(self.toggle_pause)
-        self.btn_pause.setEnabled(False)
-        tl.addWidget(self.btn_pause)
-        self.btn_cancel = TransparentPushButton(FIF.CANCEL, "取消", top)
-        self.btn_cancel.clicked.connect(self.cancel_scan)
-        tl.addWidget(self.btn_cancel)
-
-        tl.addSpacing(4)
-        tl.addWidget(self._vsep(top))
-        tl.addSpacing(4)
-
-        # 组 2：中性工具（灰阶，不抢品牌色）
-        self.btn_cfg = ToolButton(FIF.SETTING, top)
-        self.btn_cfg.setToolTip("扫描设置与规则")
-        self.btn_cfg.setFixedSize(32, 32)
-        self.btn_cfg.clicked.connect(self.open_config)
-        tl.addWidget(self.btn_cfg)
-        self.btn_history = ToolButton(FIF.HISTORY, top)
-        self.btn_history.setToolTip("扫描历史记录")
-        self.btn_history.setFixedSize(32, 32)
-        self.btn_history.clicked.connect(self.open_history)
-        tl.addWidget(self.btn_history)
-        self.btn_export = ToolButton(FIF.SAVE, top)
-        self.btn_export.setToolTip("导出当前结果为 CSV 报告")
-        self.btn_export.setFixedSize(32, 32)
-        self.btn_export.clicked.connect(self.export_report)
-        tl.addWidget(self.btn_export)
-
-        tl.addStretch(1)
-
-        # 组 3：状态胶囊（语义色：橙=进行中 / 绿=完成 / 红=异常 / 灰=就绪）
-        self.status_pill = QWidget(top)
-        self.status_pill.setObjectName("statusPill")
-        self.status_pill.setFixedHeight(28)   # 不锁会被顶栏布局拉成 52 全行高
-        spl = QHBoxLayout(self.status_pill)
-        spl.setContentsMargins(10, 0, 12, 0)
-        spl.setSpacing(7)
-        self.dot = StatusDot(self.status_pill)
-        spl.addWidget(self.dot)
-        self.status = CaptionLabel("就绪", self.status_pill)
-        spl.addWidget(self.status)
-        tl.addWidget(self.status_pill)
-        self._status_role = "gray"
-
-        tl.addSpacing(4)
-        tl.addWidget(self._vsep(top))
-        tl.addSpacing(4)
-        self.btn_theme = TransparentToolButton(FIF.BRIGHTNESS, top)
-        self.btn_theme.setToolTip("切换浅色 / 深色")
-        self.btn_theme.setFixedSize(32, 32)
-        self.btn_theme.clicked.connect(self.toggle_theme)
-        tl.addWidget(self.btn_theme)
-        root.addWidget(top)
-
-        # —— 文件夹条（已导入文件夹 + 每个文件夹扫描进度）——
-        self.folder_bar = FolderBar(self)
-        self.folder_bar.rebuild()
-        root.addWidget(self.folder_bar)
-
-        # 中部：图片墙 + 详情
-        mid = QHBoxLayout()
-        self.mid = mid
-        mid.setContentsMargins(0, 0, 0, 0)
-        mid.setSpacing(0)
-
-        left = QWidget(self)
-        ll = QVBoxLayout(left)
-        ll.setContentsMargins(0, 0, 0, 0)
-        ll.setSpacing(0)
-
-        # —— 筛选条：独立表面（surface1）+ 底部发丝，控件为 CDS 扁平选择 ——
-        fbar = QWidget(left)
-        fbar.setObjectName("filterBar")
-        fbar.setFixedHeight(46)
-        fl = QHBoxLayout(fbar)
-        fl.setContentsMargins(16, 0, 16, 0)
-        fl.setSpacing(6)
-        self.filter_bar = fbar
-        self.f_verdict = ComboBox(fbar)
-        self.f_verdict.addItems(["全部", "广告", "疑似"])
-        self.f_verdict.setFixedWidth(88)
-        self.f_verdict.setFixedHeight(30)
-        self.f_verdict.currentIndexChanged.connect(lambda _i: self.refresh())
-        fl.addWidget(self.f_verdict)
-        self.f_reason = ComboBox(fbar)
-        self.f_reason.addItems(["全部原因"])
-        self.f_reason.setFixedWidth(158)
-        self.f_reason.setFixedHeight(30)
-        self.f_reason.currentIndexChanged.connect(lambda _i: self.refresh())
-        fl.addWidget(self.f_reason)
-        self.f_search = SearchLineEdit(fbar)
-        self.f_search.setPlaceholderText("路径过滤…")
-        self.f_search.setFixedWidth(200)
-        self.f_search.setFixedHeight(30)
-        self._search_timer = QTimer(self)
-        self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(250)
-        self._search_timer.timeout.connect(self.refresh)
-        self.f_search.textChanged.connect(lambda _t: self._search_timer.start())
-        fl.addWidget(self.f_search)
-        self.f_sort = ComboBox(fbar)
-        self.f_sort.addItems(["默认顺序", "名称", "大小", "修改时间", "分数"])
-        self.f_sort.setFixedWidth(108)
-        self.f_sort.setFixedHeight(30)
-        self.f_sort.setToolTip("结果排序方式")
-        self.f_sort.currentIndexChanged.connect(lambda _i: self.refresh())
-        fl.addWidget(self.f_sort)
-        fl.addStretch(1)
-        # 计数：中性「命中」+ 语义「已选」（>0 时用品牌橙，0 时灰）
-        self.lbl_count = QWidget(fbar)
-        cl = QHBoxLayout(self.lbl_count)
-        cl.setContentsMargins(0, 0, 0, 0)
-        cl.setSpacing(6)
-        self.pill_hit = QLabel("命中 0", self.lbl_count)
-        self.pill_hit.setObjectName("countPill")
-        cl.addWidget(self.pill_hit)
-        self.pill_sel = QLabel("已选 0", self.lbl_count)
-        self.pill_sel.setObjectName("countPill")
-        cl.addWidget(self.pill_sel)
-        fl.addWidget(self.lbl_count)
-        ll.addWidget(fbar)
-
-        gwrap = QWidget(left)
-        gwrap.setObjectName("gridWrap")
-        gl = QVBoxLayout(gwrap)
-        gl.setContentsMargins(16, 12, 12, 10)
-        gl.setSpacing(0)
-        self.grid = QListView(gwrap)
-        self.grid.setObjectName("grid")
-        self.grid.setViewMode(QListView.IconMode)
-        self.grid.setResizeMode(QListView.Adjust)
-        self.grid.setMovement(QListView.Static)
-        self.grid.setUniformItemSizes(True)
-        self.grid.setGridSize(QSize(CARD_W + 8, CARD_H + 8))
-        self.grid.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.grid.setSelectionRectVisible(True)
-        self.grid.setModel(self.model)
-        self.delegate = CardDelegate(self.thumbs, self.model, self.grid)
-        self.delegate.dark = isDarkTheme()      # 初始主题推送给 delegate
-        self.grid.setItemDelegate(self.delegate)
-        self.grid.setFrameShape(QListView.NoFrame)
-        self.grid.setStyleSheet("QListView { background: transparent; }")
-        # 框选矩形：**自绘 overlay**。原生 setSelectionRectVisible 由 qfluentwidgets 的
-        # windows11 style 绘制，不认 QPalette.Highlight（改调色板后仍是深色实心块），
-        # QSS 也管不到——唯一可控方案是自己画（用户报"框选色太深"）
-        self.grid.setSelectionRectVisible(False)
-        self._band_start = None
-        self._sel_band = QWidget(self.grid.viewport())
-        self._sel_band.setObjectName("selBand")
-        self._sel_band.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self._sel_band.setAttribute(Qt.WA_StyledBackground, True)
-        self._sel_band.hide()
-        self._apply_selection_palette()
-        self.grid.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
-        self.grid.selectionModel().currentChanged.connect(self._on_current_changed)
-        self.grid.doubleClicked.connect(lambda _idx: self.open_big())          # 双击开大图
-        self.grid.selectionModel().selectionChanged.connect(self._on_multi_select)
-        self.grid.setContextMenuPolicy(Qt.CustomContextMenu)
-        # 滚动渐隐遮罩（CDS 7 档非线性）：盖在 viewport 上下缘，鼠标事件穿透
-        self._fade_top = ScrollFade("top", self.grid.viewport())
-        self._fade_bottom = ScrollFade("bottom", self.grid.viewport())
-        self._fade_top.raise_()
-        self._fade_bottom.raise_()
-        self._fade_top.hide()
-        self._fade_bottom.hide()
-        sb = self.grid.verticalScrollBar()
-        sb.valueChanged.connect(self._sync_fade_visibility)
-        sb.rangeChanged.connect(lambda *_: self._sync_fade_visibility())
-        self.grid.customContextMenuRequested.connect(self._on_context_menu)
-        gl.addWidget(self.grid, 1)
-        ll.addWidget(gwrap, 1)
-        self.grid.viewport().installEventFilter(self)
-        self.grid.installEventFilter(self)
-        mid.addWidget(left, 1)
-
-        detail = QWidget(self)
-        detail.setObjectName("detailPanel")
-        self.detail = detail
-        detail.setFixedWidth(360)
-        dv = QVBoxLayout(detail)
-        dv.setContentsMargins(0, 0, 0, 0)
-        dv.setSpacing(0)
-
-        # 头部：标题 + 判定徽标（语义色）
-        dh = QWidget(detail)
-        dh.setObjectName("detailHead")
-        dh.setFixedHeight(46)
-        dhl = QHBoxLayout(dh)
-        dhl.setContentsMargins(16, 0, 16, 0)
-        dhl.setSpacing(8)
-        dhl.addWidget(CaptionLabel("详情", dh))
-        dhl.addStretch(1)
-        self.detail_badge = QLabel("未选中", dh)
-        self.detail_badge.setObjectName("detailBadge")
-        dhl.addWidget(self.detail_badge)
-        dv.addWidget(dh)
-
-        # 预览画布：独立圆角容器 + 发丝边（不再是裸 QLabel 贴文字）
-        dbody = QWidget(detail)
-        dbl = QVBoxLayout(dbody)
-        dbl.setContentsMargins(16, 12, 16, 12)
-        dbl.setSpacing(10)
-        self.preview = QLabel("选中图片查看预览", dbody)
-        self.preview.setObjectName("previewCanvas")
-        self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setMinimumHeight(180)
-        dbl.addWidget(self.preview, 1)
-        self.info = TextEdit(dbody)
-        self.info.setReadOnly(True)
-        self.info.setFixedHeight(152)
-        dbl.addWidget(self.info)
-        # 动作行：‹ › 中性 / 标记广告=红 / 保留=绿 / 大图=幽灵
-        drow = QHBoxLayout()
-        drow.setSpacing(6)
-        self.btn_prev = ToolButton(dbody)
-        self.btn_prev.setText("‹")
-        self.btn_prev.setToolTip("上一张（←）")
-        self.btn_prev.setFixedSize(32, 32)
-        self.btn_prev.clicked.connect(lambda: self.step(-1))
-        drow.addWidget(self.btn_prev)
-        self.btn_next = ToolButton(dbody)
-        self.btn_next.setText("›")
-        self.btn_next.setToolTip("下一张（→）")
-        self.btn_next.setFixedSize(32, 32)
-        self.btn_next.clicked.connect(lambda: self.step(1))
-        drow.addWidget(self.btn_next)
-        self.btn_mark = PushButton("标记广告", dbody)
-        self.btn_mark.setFixedHeight(32)
-        self.btn_mark.clicked.connect(lambda: self.mark_current(True))
-        drow.addWidget(self.btn_mark)
-        self.btn_keep = PushButton("保留", dbody)
-        self.btn_keep.setFixedHeight(32)
-        self.btn_keep.clicked.connect(lambda: self.mark_current(False))
-        drow.addWidget(self.btn_keep)
-        drow.addStretch(1)
-        self.btn_big = TransparentPushButton(FIF.ZOOM_IN, "大图", dbody)
-        self.btn_big.clicked.connect(self.open_big)
-        drow.addWidget(self.btn_big)
-        dbl.addLayout(drow)
-        dv.addWidget(dbody, 1)
-        mid.addWidget(detail)
-        root.addLayout(mid, 1)
-
-        # 底部状态条
-        bot = QWidget(self)
-        bot.setObjectName("bottomBar")
-        bot.setFixedHeight(60)
-        bl = QHBoxLayout(bot)
-        bl.setContentsMargins(14, 0, 14, 0)
-        bl.setSpacing(8)
-        self.progress = self.folder_bar.progress  # 进度条合并到文件夹条
-        self.btn_log = TransparentPushButton("操作日志", bot)
-        self.btn_log.setCheckable(True)
-        self.btn_log.toggled.connect(self.toggle_log)
-        bl.addWidget(self.btn_log)
-        bl.addSpacing(4)
-        bl.addWidget(self._vsep(bot))
-        bl.addSpacing(4)
-        self.lbl_disposal = CaptionLabel("处置方式", bot)
-        bl.addWidget(self.lbl_disposal)
-        self.seg_disposal = Segmented(
-            [("隔离", "quarantine"), ("回收站", "recycle"), ("删除", "delete")], bot)
-        self.seg_disposal.setFixedWidth(240)
-        self.seg_disposal.setToolTip("隔离=可恢复；回收站=进系统回收站；删除=永久删除")
-        self.cb_disposal = None
-        # 测试兼容别名
-        self.btn_dq = self.seg_disposal._btns[0]
-        self.btn_dr = self.seg_disposal._btns[1]
-        self.btn_dd = self.seg_disposal._btns[2]
-        bl.addWidget(self.seg_disposal)
-        bl.addStretch(1)
-        self.btn_undo = TransparentPushButton(FIF.BACK_TO_WINDOW, "撤销处置", bot)
-        self.btn_undo.setToolTip("撤销上一次隔离处置（文件移回原位置）")
-        self.btn_undo.setEnabled(False)
-        self.btn_undo.clicked.connect(self.undo_disposal)
-        bl.addWidget(self.btn_undo)
-        self.btn_openq = TransparentPushButton("打开隔离目录", bot)
-        self.btn_openq.clicked.connect(self.open_quarantine_dir)
-        bl.addWidget(self.btn_openq)
-        self.btn_restore = TransparentPushButton("恢复隔离区…", bot)
-        self.btn_restore.clicked.connect(self.restore_ui)
-        bl.addWidget(self.btn_restore)
-        bl.addSpacing(4)
-        bl.addWidget(self._vsep(bot))
-        bl.addSpacing(4)
-        # 破坏性动作 = 语义红，与"开始扫描"的品牌橙分工
-        self.btn_dispose = PrimaryPushButton(FIF.DELETE, "执行处置", bot)
-        self.btn_dispose.setFixedHeight(32)
-        self.btn_dispose.clicked.connect(self.execute_disposal)
-        bl.addWidget(self.btn_dispose)
-        root.addWidget(bot)
-        self.bot = bot              # 布局管理器：D3 模式把它变悬浮胶囊
-        self._bot_css = bot.styleSheet()
-
-        # 操作日志（默认折叠，点"操作日志"展开）
-        self.log = TextEdit(self)
-        self.log.setReadOnly(True)
-        self.log.setFixedHeight(0)
-        self.log.setVisible(False)
-        root.addWidget(self.log)
-
-        # —— 布局：用户决定只保留一种（侧栏 + 图片墙 + 详情面板，原 workbench 形态），
-        # 三种骨架与切换入口已全部移除（LayoutManager.apply 强制为该形态）——
-        from cds_layouts import LayoutManager
-        self.lm = LayoutManager(self)
-        self.layout_mode = "workbench"
-        self.lm.apply("workbench")
-
-        # —— 空状态（claudecodeui 规范）：无结果时覆盖在图片墙上，鼠标穿透 ——
-        from cds_widgets import CDSEmptyState
-        host = self.grid.parent() if self.grid.parent() else self
-        self._empty = CDSEmptyState(
-            "◍", "还没有扫描结果",
-            "把相册文件夹拖进窗口，或点「添加文件夹」→「开始扫描」。\n按 Ctrl+K 可打开命令面板。",
-            host)
-        self._empty.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self._empty.setGeometry(self.grid.geometry())
-        self._empty.hide()
-        # 搜索框带 ⌘K 提示（快捷键可发现性）
-        try:
-            self.f_search.setPlaceholderText("路径过滤…  Ctrl+K 命令面板")
-        except Exception:
-            pass
-
-        self._apply_styles()
+        from workbench_ui import build_workbench
+        build_workbench(self)
 
     def _apply_styles(self):
         """全部按 cds_tokens 生成，且按「角色」上色：
@@ -1947,9 +1616,13 @@ class App(FramelessWindow):
             ProgressBar::chunk {{ background: {clay}; border-radius: 3px; }}""")
 
         setCustomStyleSheet(self.btn_scan, primary, primary)
-        setCustomStyleSheet(self.btn_dispose, danger, danger)
+        disposal_css = danger if self._current_disposal() == 'delete' else primary
+        setCustomStyleSheet(self.btn_dispose, disposal_css, disposal_css)
         for w in (self.btn_add, self.btn_cancel, self.btn_openq, self.btn_restore,
-                  self.btn_big, self.btn_log, self.btn_undo):
+                  self.btn_big, self.btn_log, self.btn_undo, self.btn_pause,
+                  self.btn_rules, self.btn_cfg, self.btn_history, self.btn_export,
+                  self.btn_theme, self.btn_palette, self.btn_prev, self.btn_next,
+                  self.btn_all, self.btn_invert, self.btn_clear, self.btn_similar):
             setCustomStyleSheet(w, trans, trans)
         mk = outline(dang_fg, dang_fill, dang_edge)
         kp = outline(ok_fg, ok_fill, ok_edge)
@@ -1958,9 +1631,6 @@ class App(FramelessWindow):
         for w in (self.f_verdict, self.f_reason, self.f_search, self.f_sort):
             setCustomStyleSheet(w, inp, inp)
         # Segmented 自带样式（不走 PushButton 模板）
-        for w in (self.btn_cfg, self.btn_history, self.btn_export,
-                  self.btn_theme, self.btn_prev, self.btn_next):
-            setCustomStyleSheet(w, tool, tool)
         setCustomStyleSheet(self.progress, prog, prog)
         # 分隔发丝 / 标签 / 预览画布 / 徽标 上色
         self._paint_chrome(d)
@@ -2175,8 +1845,9 @@ class App(FramelessWindow):
         items = list(self.model.items)
         if not items:
             return self
-        if len(self.model.checked) >= len(items):
-            self.model.checked.clear()
+        visible_paths = {it['path'] for it in items}
+        if visible_paths.issubset(self.model.checked):
+            self.model.checked.difference_update(visible_paths)
             self._log("已取消全选")
         else:
             for it in items:
@@ -2254,6 +1925,9 @@ class App(FramelessWindow):
     def open_palette(self):
         """⌘K 命令面板（claudecodeui 范式）：所有操作一个入口。"""
         cmds = [
+            ('添加文件夹', self.add_folder),
+            ('扫描设置', self.open_config),
+            ('打开隔离目录', self.open_quarantine_dir),
             ("开始扫描", self.start_scan),
             ("暂停 / 继续扫描", self.toggle_pause),
             ("取消扫描", self.cancel_scan),
@@ -2263,7 +1937,7 @@ class App(FramelessWindow):
             ("选相似组", self.select_similar_groups),
             ("执行处置", self.execute_disposal),
             ("撤销上次隔离处置", self.undo_disposal),
-            ("规则管理…", lambda: self.build_rule_editor().exec()),
+            ("规则管理…", self.open_rule_editor),
             ("扫描历史…", self.open_history),
             ("隔离区管理…", self.restore_ui),
             ("导出 CSV 报告", self.export_report),
@@ -2277,6 +1951,9 @@ class App(FramelessWindow):
         return ConfigDialog(self, self.cfg)
 
     def open_config(self):
+        if self._disposing or self._file_busy or (self.scan_thread and self.scan_thread.is_alive()):
+            self._toast('请在当前任务完成后修改设置', ok=False)
+            return
         d = self.build_config()
         d.exec()
 
@@ -2284,6 +1961,9 @@ class App(FramelessWindow):
         return RuleEditorLite(self, self.cfg)
 
     def open_rule_editor(self):
+        if self._disposing or self._file_busy or (self.scan_thread and self.scan_thread.is_alive()):
+            self._toast('请在当前任务完成后修改规则', ok=False)
+            return
         self.build_rule_editor().exec()
 
     # ---------- 拖入 ----------
@@ -2308,7 +1988,12 @@ class App(FramelessWindow):
             e.ignore()
 
     def closeEvent(self, e):
+        if (self._disposing or self._file_busy) and not self._ask(
+                "正在处置", "文件操作正在进行中，退出会中断操作。确定退出？"):
+            e.ignore()
+            return
         self.cancel.set()
+        self.pause.clear()
         try:
             self._timer.stop()
         except Exception:
@@ -2317,10 +2002,15 @@ class App(FramelessWindow):
             self.thumbs.stop()
         except Exception:
             pass
-        if self._disposing:
-            if not self._ask("正在处置", "文件处置正在进行中，现在退出会中断移动。\n确定退出？"):
-                e.ignore()
-                return
+        for name in ('_preview_timer', '_resize_timer', '_thumb_timer', '_sweep_timer'):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                timer.stop()
+        if self._big_win is not None:
+            try:
+                self._big_win.close()
+            except RuntimeError:
+                pass
         e.accept()
 
     # ---------- 文件夹 ----------
@@ -2359,6 +2049,9 @@ class App(FramelessWindow):
 
     # ---------- 扫描 ----------
     def start_scan(self):
+        if self._disposing or self._file_busy:
+            self._info('提示', '请等待当前文件操作完成')
+            return
         roots = self.get_roots()
         if not roots:
             self._info("提示", "请先在设置里添加要扫描的文件夹")
@@ -2389,6 +2082,8 @@ class App(FramelessWindow):
         except Exception:
             pass
         af.save_config(self.cfg)
+        self._scan_generation += 1
+        self._cached_count = 0
         self.cancel.clear()
         self.pause.clear()
         self.btn_pause.setEnabled(True)
@@ -2417,13 +2112,16 @@ class App(FramelessWindow):
         self.folder_bar.update_progress()
         self.scan_thread = threading.Thread(
             target=af.scan_worker,
-            args=(roots, self.cfg, enable, self._cache, self.scan_q, self.cancel, self.pause),
+            args=(roots, copy.deepcopy(self.cfg), enable, self._cache, self.scan_q, self.cancel, self.pause),
             daemon=True)
         self.scan_thread.start()
+        self._sync_actions()
         return self
 
     def toggle_pause(self):
         """暂停/继续扫描（引擎分批提交，暂停时真正停下不再烧 CPU）。"""
+        if not self.scan_thread or not self.scan_thread.is_alive():
+            return self
         if self.pause.is_set():
             self.pause.clear()
             self.btn_pause.setText("暂停")
@@ -2461,6 +2159,7 @@ class App(FramelessWindow):
                     self.progress.setValue(0)
                 elif kind == "cached":
                     cached_n = payload
+                    self._cached_count = payload
                 elif kind == "current":
                     root, fname = payload
                     self._current_root = root
@@ -2487,7 +2186,9 @@ class App(FramelessWindow):
                 elif kind == "restored":
                     restored = payload
                 elif kind == "similar":
-                    similar = payload
+                    generation, groups = payload
+                    if generation == self._scan_generation:
+                        similar = groups
                 elif kind == "quarantine_op":
                     qop = payload
                 elif kind == "done":
@@ -2559,14 +2260,14 @@ class App(FramelessWindow):
                 self.btn_pause.setText("暂停")
                 self.dot.set_state("ready")
                 n_ad = sum(1 for it in self.items if it["verdict"] == "ad")
-                n_su = len(self.items) - n_ad
-                self.set_status(f"扫描完成 · 命中 {len(self.items)}（广告 {n_ad} / 疑似 {n_su}）")
-                self._log(f"扫描完成：命中 {len(self.items)}（广告 {n_ad} / 疑似 {n_su}）")
+                n_su = sum(it['verdict'] == 'suspect' for it in self.items)
+                n_er = sum(it['verdict'] == 'error' for it in self.items)
+                self._log(f"扫描完成：{self.total_files} 张 · 广告 {n_ad} / 疑似 {n_su} / 异常 {n_er}")
                 af.append_history({
                     "time": time.strftime("%F %T"),
                     "roots": [Path(r).name for r in self.get_roots()],
                     "total": self.total_files,
-                    "hits": len(self.items), "ad": n_ad, "suspect": n_su,
+                    "hits": len(self.items), "ad": n_ad, "suspect": n_su, "error": n_er,
                     "duration": round(time.time() - getattr(self, "_scan_t0", time.time()), 1)})
                 self._current_file = None
                 self._current_root = None
@@ -2579,6 +2280,7 @@ class App(FramelessWindow):
             if similar is not None:
                 self._apply_similar(similar)
             if qop is not None:
+                self._file_busy = False
                 verb, n, errors = qop
                 self._log(f"隔离区{verb}：{n} 项" + (f"，{len(errors)} 项失败" if errors else ""))
                 self._toast(f"隔离区{verb}完成：{n} 项", ok=not errors)
@@ -2590,6 +2292,7 @@ class App(FramelessWindow):
                             b.setEnabled(True)
                     except RuntimeError:
                         self._qdlg = None
+            self._sync_actions()
         except Exception:
             import traceback
             traceback.print_exc()
@@ -2640,11 +2343,13 @@ class App(FramelessWindow):
         v, r, q = fp
         if v == "广告" and it["verdict"] != "ad":
             return False
-        if v == "疑似" and it["verdict"] not in ("suspect", "error"):
+        if v == "疑似" and it["verdict"] != "suspect":
+            return False
+        if v == "异常" and it['verdict'] != 'error':
             return False
         if r != "全部原因" and not any(h.get("label", "").startswith(r) for h in it["reasons"]):
             return False
-        if q and q not in it["path"]:
+        if q and q.casefold() not in it["path"].casefold():
             return False
         return True
 
@@ -2673,16 +2378,41 @@ class App(FramelessWindow):
         return sorted(items, key=lambda it: it.get("score", 0), reverse=True)
 
     def refresh(self):
+        current = self._current_item()
+        current_path = current['path'] if current else None
         self.model.reset_items(self._sorted_items([it for it in self.items if self._passes_filter(it)]))
         self._sync_fade_visibility()
         self.model.checked = self.checked
         self.grid.viewport().update()
         self._update_count_label()
+        if self.model.items:
+            row = next((i for i, it in enumerate(self.model.items) if it['path'] == current_path), 0)
+            self.grid.setCurrentIndex(self.model.index(row, 0))
+        else:
+            self._pending_preview = self._preview_path = None
+            self._pix = None
+            self.preview.clear()
+            self.preview.setText('当前没有待审图片')
+            self.info.clear()
+            self.detail_filename.setText('尚未选择图片')
+            self.detail_path.clear()
+            self.preview_index.setText('— / —')
+            self.detail_badge.setText('未选中')
+            self.detail_badge.setStyleSheet(f"#detailBadge {{ {CDST.pill_qss(isDarkTheme(), 'gray')} }}")
         # 空状态：仅在「无结果且没在扫描」时出现
         e = getattr(self, "_empty", None)
         if e is not None:
             scanning = bool(self.scan_thread and self.scan_thread.is_alive())
             e.setVisible(len(self.model.items) == 0 and not scanning)
+            if self.items:
+                e.title.setText('没有符合筛选条件的图片')
+                e.desc.setText('调整判定、命中原因或路径搜索。\n隐藏的已选图片仍保留在待处置集合中。')
+            elif self.total_files:
+                e.title.setText('本次审查已完成' if self._last_progress else '没有待审结果')
+                e.desc.setText(f'本次扫描 {self.total_files} 张图片。可重新扫描或添加其他文件夹。')
+            else:
+                e.title.setText('开始一次图片审查')
+                e.desc.setText('添加本地文件夹，或把文件夹拖入窗口。\n所有识别均在本机完成。')
             e.setGeometry(self.grid.geometry())
 
     def _reload_reason_filter(self):
@@ -2702,23 +2432,67 @@ class App(FramelessWindow):
         self.f_reason.blockSignals(False)
 
     def _update_count_label(self):
-        """计数药丸：命中常驻（灰），已选只在 >0 时出现（品牌橙）——0 时不占视觉。
-        所有语义药丸统一 26px 高（用户：命中/已选/详情徽章三个胶囊大小不一）。"""
+        """全局勾选与当前筛选分别计数，处置始终作用于全局勾选。"""
         n_hit, n_sel = len(self.model.items), len(self.checked)
         d = isDarkTheme()
-        self.pill_hit.setText(f"命中 {n_hit}")
+        self.pill_hit.setText(f"待审 {n_hit}")
         self.pill_hit.setFixedHeight(26)
         self.pill_hit.setAlignment(Qt.AlignCenter)
         self.pill_hit.setStyleSheet(
             f"#countPill {{ {CDST.pill_qss(d, 'gray')} }}")
-        self.pill_sel.setText(f"已选 {n_sel}")
+        picked = [it for it in self.items if it['path'] in self.checked]
+        size = sum((self._stat(it['path']) or (0, 0))[0] for it in picked) / 1048576
+        visible = sum(it['path'] in self.checked for it in self.model.items)
+        self.pill_sel.setText(f"已选 {n_sel} 张 · {size:.1f} MB")
         self.pill_sel.setFixedHeight(26)
         self.pill_sel.setAlignment(Qt.AlignCenter)
         role = "clay" if n_sel else "gray"
         self.pill_sel.setStyleSheet(
             f"#countPill {{ {CDST.pill_qss(d, role)} }}")
-        self.pill_sel.setVisible(n_sel > 0)
-        self.lbl_count.setToolTip(f"命中 {n_hit} · 已选 {n_sel}")
+        self.pill_sel.setVisible(True)
+        self.lbl_count.setToolTip(f"待审 {n_hit} · 已选 {n_sel} · 当前筛选内 {visible}")
+        if hasattr(self, 'selection_scope'):
+            hidden = max(0, len(picked) - visible)
+            self.selection_scope.setText(f'当前筛选内 {visible} 张' + (f'，隐藏 {hidden} 张' if hidden else ''))
+            totals = {v: sum(it['verdict'] == v for it in self.items) for v in ('ad', 'suspect', 'error')}
+            self.review_summary.setText(f"广告 {totals['ad']} · 疑似 {totals['suspect']} · 异常 {totals['error']}")
+            mode = self._current_disposal()
+            verb = {'quarantine': '隔离', 'recycle': '移入回收站', 'delete': '永久删除'}[mode]
+            self.btn_dispose.setText(f'{verb} {len(picked)} 张')
+            fg = CDST.c(d, CDSTT.danger if mode == 'delete' else CDSTT.clay)
+            css = (f'PrimaryPushButton {{ background:{fg}; color:#ffffff; border:none;'
+                   f' border-radius:8px; padding:6px 14px; }}'
+                   f'PrimaryPushButton:disabled {{ background:{CDST.c(d, CDSTT.muted)};'
+                   f' color:{CDST.c(d, CDSTT.text_3)}; }}')
+            if getattr(self, '_dispose_css', None) != css:
+                setCustomStyleSheet(self.btn_dispose, css, css)
+                self._dispose_css = css
+            self._sync_actions()
+
+    def _sync_actions(self):
+        if not hasattr(self, 'btn_dispose'):
+            return
+        scanning = bool(self.scan_thread and self.scan_thread.is_alive())
+        busy = self._disposing or self._file_busy
+        self.btn_scan.setEnabled(not scanning and not busy)
+        self.btn_pause.setEnabled(scanning and not self.cancel.is_set())
+        self.btn_cancel.setEnabled(scanning and not self.cancel.is_set())
+        self.btn_pause.setVisible(scanning)
+        self.btn_cancel.setVisible(scanning)
+        self.btn_dispose.setEnabled(bool(self.checked) and not scanning and not busy)
+        self.btn_restore.setEnabled(not scanning and not busy)
+        self.btn_undo.setEnabled(bool(self._undo_batch) and not scanning and not busy)
+        self.seg_disposal.setEnabled(not busy)
+        for name in ('btn_cfg', 'btn_rules', 'btn_add'):
+            getattr(self, name).setEnabled(not scanning and not busy)
+        self.folder_bar._scroll.setEnabled(not scanning and not busy)
+
+    def _quarantine_root(self):
+        if self._quarantine_override is not None:
+            return Path(self._quarantine_override)
+        roots = self.get_roots()
+        base = Path(roots[0]).anchor if roots else Path.home().anchor
+        return Path(base) / af.QUARANTINE_NAME
 
     def _paint_detail_badge(self, it):
         """详情头判定徽标：语义色（红=广告 / 琥珀=疑似 / 蓝=异常 / 绿=干净）。
@@ -2739,10 +2513,11 @@ class App(FramelessWindow):
             return
         paths = [it["path"] for it in self.items]
         thr = int(self.cfg.get("phash", {}).get("threshold", 6))
+        generation = self._scan_generation
 
         def work():
             groups = af.cluster_similar(paths, thr, self._cache)
-            self.scan_q.put(("similar", groups))
+            self.scan_q.put(("similar", (generation, groups)))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -2778,11 +2553,19 @@ class App(FramelessWindow):
         it = next((x for x in self.items if x["path"] == path), None)
         if not it:
             return
-        p_disp = path if len(path) <= 46 else (path[:14] + "…" + path[-28:])  # 360px 宽单行约 46 字符
-        info = f"{p_disp}\n判定: {VERDICT_TEXT.get(it['verdict'], it['verdict'])}  分数: {it['score']:.0f}\n"
+        self.detail_filename.setText(Path(path).name)
+        self.detail_filename.setToolTip(path)
+        fm = QFontMetrics(self.detail_path.font())
+        self.detail_path.setText(fm.elidedText(path, Qt.ElideMiddle, max(140, self.detail.width() - 40)))
+        self.detail_path.setToolTip(path)
+        row = self.grid.currentIndex().row()
+        self.preview_index.setText(f'{row + 1} / {len(self.model.items)}')
+        info = f"判定证据 · {VERDICT_TEXT.get(it['verdict'], it['verdict'])} · 规则得分 {it['score']:.0f}\n"
         info += "\n".join(f"· {h.get('label', '')}" for h in it["reasons"])
         if it.get("ocr_text"):
-            info += f"\nOCR: {it['ocr_text'][:180]}"
+            info += f"\n\nOCR 识别文本\n{it['ocr_text']}"
+        else:
+            info += '\n\nOCR 识别文本\n未获取文字（可能未启用或由其他规则提前判定）。'
         gi = self._sim_map.get(path)
         if gi is not None:
             info += f"\n相似组: {len(self.similar_groups[gi])} 张"
@@ -2800,7 +2583,10 @@ class App(FramelessWindow):
                 rgb = img.convert("RGB")
                 self._sig_preview.emit((path, rgb.tobytes(), rgb.width, rgb.height))
             except Exception as e:
-                self._sig_preview_err.emit((path, str(e)))
+                try:
+                    self._sig_preview_err.emit((path, str(e)))
+                except RuntimeError:
+                    pass
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -2880,6 +2666,14 @@ class App(FramelessWindow):
         self._fade_bottom.setGeometry(0, vp.height() - 28, vp.width(), 28)
         if getattr(self, "_preview_path", None):
             self._resize_timer.start()
+        if hasattr(self, 'detail_filename'):
+            compact = self.height() < 800
+            self.detail.layout().setSpacing(6 if compact else 10)
+            self.preview.setMinimumHeight(80 if compact else 130)
+            self.info.setMinimumHeight(70 if compact else 100)
+            self.detail_path.setVisible(not compact)
+            self.lbl_disposal.setVisible(self.width() >= 1200)
+            self.status.setMaximumWidth(max(240, self.width() - 560))
 
     def _reload_preview_for_size(self):
         if self._preview_path:
@@ -2957,6 +2751,8 @@ class App(FramelessWindow):
         return {1: "recycle", 2: "delete"}.get(idx, "quarantine")
 
     def execute_disposal(self):
+        if self._disposing or self._file_busy:
+            return self
         checked_items = [it for it in self.items if it["path"] in self.checked]
         if not checked_items:
             self._info("提示", "请先勾选要处置的图片（点卡片左上圆圈或按空格）")
@@ -2977,14 +2773,17 @@ class App(FramelessWindow):
         size_mb = total_bytes / 1048576
         breakdown = f"共 {len(checked_items)} 张（广告 {n_ad} / 疑似 {n_su}" + \
                     (f" / 异常 {n_er}" if n_er else "") + f"）· 总大小 {size_mb:.1f} MB"
+        visible = {it['path'] for it in self.model.items}
+        hidden = sum(it['path'] not in visible for it in checked_items)
+        if hidden:
+            breakdown += f'\n其中 {hidden} 张被当前筛选隐藏，也会参与本次处置。'
         if mode == "delete" and not self._ask(
                 "危险操作", f"{breakdown}\n将永久删除，不可恢复！\n确定继续？"):
             return
         roots = self.get_roots()
         q_root = None
         if mode == "quarantine":
-            base = Path(roots[0]).anchor if roots else str(Path.home().anchor)
-            q_root = Path(base) / af.QUARANTINE_NAME
+            q_root = self._quarantine_root()
             if not self._ask("隔离确认",
                              f"{breakdown}\n将移动到\n{q_root}\n（可随时恢复 / 撤销）\n继续？"):
                 return
@@ -2996,9 +2795,10 @@ class App(FramelessWindow):
         self.btn_dispose.setEnabled(False)
         self.btn_restore.setEnabled(False)
         self.set_status("处置中…")
+        self._disposing = True
+        self._sync_actions()
 
         def work():
-            self._disposing = True
             moved, errors, ok_paths = 0, [], []
             try:
                 if mode == "quarantine":
@@ -3015,9 +2815,7 @@ class App(FramelessWindow):
         return self
 
     def open_quarantine_dir(self):
-        roots = self.get_roots()
-        base = Path(roots[0]).anchor if roots else str(Path.home().anchor)
-        q_root = Path(base) / af.QUARANTINE_NAME
+        q_root = self._quarantine_root()
         if not q_root.exists():
             self._info("提示", f"隔离目录还不存在：\n{q_root}\n（执行一次隔离处置后会自动创建）")
             return self
@@ -3026,13 +2824,15 @@ class App(FramelessWindow):
 
     def undo_disposal(self):
         """撤销上一次隔离处置：按 manifest 把该批文件移回原位置。"""
-        if not self._undo_batch:
+        if not self._undo_batch or self._disposing or self._file_busy or (self.scan_thread and self.scan_thread.is_alive()):
             return self
         q_root_str, srcs = self._undo_batch
         if not self._ask("撤销处置", f"将把上次隔离的 {len(srcs)} 张图移回原位置\n继续？"):
             return self
         self.btn_undo.setEnabled(False)
         self._undo_batch = None
+        self._disposing = True
+        self._sync_actions()
 
         def work():
             try:
@@ -3051,9 +2851,9 @@ class App(FramelessWindow):
 
     def restore_ui(self):
         """隔离区管理：查看 / 还原选中 / 彻底删除 / 全部还原。"""
-        roots = self.get_roots()
-        base = Path(roots[0]).anchor if roots else str(Path.home().anchor)
-        q_root = Path(base) / af.QUARANTINE_NAME
+        if self._disposing or self._file_busy or (self.scan_thread and self.scan_thread.is_alive()):
+            return self
+        q_root = self._quarantine_root()
         if not q_root.exists():
             d = QFileDialog.getExistingDirectory(self, "选择隔离目录（含 manifest.json）")
             if not d:
@@ -3189,7 +2989,7 @@ class ConfigDialog(MessageBoxBase):
         self.ocr_scope = ComboBox(self.widget)
         self.ocr_scope.addItems(["条带优先（快）", "条带+全图兜底（稳）"])
         self.ocr_scope.setCurrentIndex(1 if cfg.get("ocr", {}).get("full_image_if_nothing", True) else 0)
-        self.ocr_scope.setToolTip("条带没找到广告词汇时，是否再对整张图做一次 OCR（中央水印必须开）")
+        self.ocr_scope.setToolTip("未达到广告高阈值时补扫全图，以识别中央水印")
         orow.addWidget(self.ocr_scope)
         orow.addSpacing(16)
         orow.addWidget(CaptionLabel("线程", self.widget))
@@ -3200,9 +3000,46 @@ class ConfigDialog(MessageBoxBase):
         orow.addStretch(1)
         self.viewLayout.addLayout(orow)
 
+        from PySide6.QtWidgets import QSpinBox
+        advanced = QHBoxLayout()
+        advanced.addWidget(CaptionLabel('相似距离阈值', self.widget))
+        self.sim_threshold = QSpinBox(self.widget)
+        self.sim_threshold.setRange(0, 64)
+        self.sim_threshold.setValue(int(cfg.get('phash', {}).get('threshold', 6)))
+        self.sim_threshold.setToolTip('dHash 距离；越小越严格。修改后下次扫描生效。')
+        advanced.addWidget(self.sim_threshold)
+        advanced.addStretch()
+        limit = min(os.cpu_count() or 4, 8)
+        advanced.addWidget(CaptionLabel(f'本机实际并行上限 {limit} 线程', self.widget))
+        self.viewLayout.addLayout(advanced)
+
         self.yesButton.setText("保存")
         self.cancelButton.setText("关闭")
         self.widget.setMinimumWidth(640)
+        from workbench_ui import style_dialog
+        style_dialog(self)
+
+    def _reload_controls(self):
+        cfg = self.cfg
+        self.cb_fn.setChecked(cfg.get('_enable_filename', True))
+        self.cb_shape.setChecked(cfg.get('_enable_shape', True))
+        self.cb_qr.setChecked(cfg['qr']['enabled'])
+        self.cb_ocr.setChecked(cfg['ocr']['enabled'])
+        self.cb_sim.setChecked(cfg['phash']['enabled'])
+        self.sim_threshold.setValue(int(cfg['phash']['threshold']))
+        self.ocr_scope.setCurrentIndex(int(bool(cfg['ocr']['full_image_if_nothing'])))
+        self.cb_workers.setCurrentIndex(max(0, min(15, int(cfg['workers']) - 1)))
+
+    def _form_config(self):
+        data = copy.deepcopy(self.cfg)
+        data['_enable_filename'] = self.cb_fn.isChecked()
+        data['_enable_shape'] = self.cb_shape.isChecked()
+        data['qr']['enabled'] = self.cb_qr.isChecked()
+        data['ocr']['enabled'] = self.cb_ocr.isChecked()
+        data['ocr']['full_image_if_nothing'] = self.ocr_scope.currentIndex() == 1
+        data['phash'].update(enabled=self.cb_sim.isChecked(), threshold=self.sim_threshold.value())
+        data['workers'] = self.cb_workers.currentIndex() + 1
+        return data
 
     def _add(self):
         d = QFileDialog.getExistingDirectory(self, "选择要扫描的文件夹")
@@ -3228,7 +3065,7 @@ class ConfigDialog(MessageBoxBase):
         if not path:
             return
         try:
-            data = {k: v for k, v in self.cfg.items() if not k.startswith("_last_")}
+            data = {k: v for k, v in self._form_config().items() if not k.startswith("_last_")}
             Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             InfoBar.success(title="已导出", content=Path(path).name,
                             orient=Qt.Horizontal, isClosable=True,
@@ -3246,6 +3083,33 @@ class ConfigDialog(MessageBoxBase):
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             if not isinstance(data, dict) or "ocr_keywords" not in data:
                 raise ValueError("不是有效的广告图过滤配置（缺少 ocr_keywords）")
+            merged = copy.deepcopy(af.DEFAULT_CONFIG)
+            for key, value in data.items():
+                if key in ('filename_rules', 'ocr_keywords', 'whitelist_rules'):
+                    if not isinstance(value, list):
+                        raise ValueError(f'{key} 须为规则列表')
+                    for rule in value:
+                        if not isinstance(rule, dict) or not isinstance(rule.get('pattern'), str):
+                            raise ValueError(f'{key} 中存在无效规则')
+                        re.compile(rule['pattern'])
+                        if key == 'ocr_keywords':
+                            weight = float(rule.get('weight', 1))
+                            if not 1 <= weight <= 10000:
+                                raise ValueError('规则权重须在 1–10000 范围内')
+                    merged[key] = value
+                elif isinstance(merged.get(key), dict):
+                    if not isinstance(value, dict):
+                        raise ValueError(f'{key} 须为配置对象')
+                    merged[key].update(value)
+                elif not key.startswith('_last_'):
+                    merged[key] = value
+            if not 1 <= int(merged['workers']) <= 16:
+                raise ValueError('线程须在 1–16 范围内')
+            if not 0 <= int(merged['phash']['threshold']) <= 64:
+                raise ValueError('相似距离须在 0–64 范围内')
+            for key in ('strip_ratio', 'max_dim', 'score_high', 'score_low'):
+                if float(merged['ocr'][key]) <= 0:
+                    raise ValueError(f'OCR 参数 {key} 须大于 0')
         except Exception as e:
             InfoBar.error(title="导入失败", content=str(e),
                           orient=Qt.Horizontal, isClosable=True,
@@ -3253,23 +3117,19 @@ class ConfigDialog(MessageBoxBase):
             return
         # 原地更新（app.cfg 引用不变）并立即落盘；界面控件重开对话框即可见新值
         self.cfg.clear()
-        self.cfg.update(data)
+        self.cfg.update(merged)
         af.save_config(self.cfg)
-        InfoBar.success(title="已导入", content="配置已生效；重新打开设置可查看新值",
+        self._reload_controls()
+        InfoBar.success(title="已导入", content="配置和当前设置控件已同步更新",
                         orient=Qt.Horizontal, isClosable=True,
                         position=InfoBarPosition.TOP, duration=3000, parent=self)
 
     def validate(self):
         roots = [self.folder_list.item(i).data(Qt.UserRole) for i in range(self.folder_list.count())]
         self.app._roots = [r for r in roots if r]
-        self.cfg["_enable_filename"] = self.cb_fn.isChecked()
-        self.cfg["_enable_shape"] = self.cb_shape.isChecked()
-        self.cfg["qr"]["enabled"] = self.cb_qr.isChecked()
-        self.cfg["ocr"]["enabled"] = self.cb_ocr.isChecked()
-        self.cfg["ocr"]["full_image_if_nothing"] = (self.ocr_scope.currentIndex() == 1)
-        self.cfg["phash"] = {"enabled": self.cb_sim.isChecked(),
-                             "threshold": int(self.cfg.get("phash", {}).get("threshold", 6))}
-        self.cfg["workers"] = self.cb_workers.currentIndex() + 1
+        data = self._form_config()
+        self.cfg.clear()
+        self.cfg.update(data)
         af.save_config(self.cfg)
         if hasattr(self.app, "folder_bar"):
             self.app.folder_bar.rebuild()
@@ -3312,6 +3172,8 @@ class RuleEditorLite(MessageBoxBase):
         self.yesButton.setText("保存规则")
         self.cancelButton.setText("关闭")
         self.widget.setMinimumWidth(820)
+        from workbench_ui import style_dialog
+        style_dialog(self)
 
     def _rule_page(self, rules, with_weight, label):
         from PySide6.QtWidgets import QAbstractItemView, QHBoxLayout as HB, QHeaderView, QTableWidgetItem, QWidget
@@ -3524,7 +3386,7 @@ class HistoryDialog(MessageBoxBase):
         hist = list(reversed(af.load_history()))
         t = TableWidget(self.widget)
         t.setColumnCount(5)
-        t.setHorizontalHeaderLabels(["时间", "文件夹", "扫描总数", "命中（广告/疑似）", "耗时"])
+        t.setHorizontalHeaderLabels(["时间", "文件夹", "扫描总数", "命中（广/疑/异）", "耗时"])
         t.verticalHeader().setVisible(False)
         t.setShowGrid(False)
         t.setBorderVisible(True)
@@ -3542,7 +3404,7 @@ class HistoryDialog(MessageBoxBase):
             t.setItem(r, 1, QTableWidgetItem("、".join(h.get("roots", []))))
             t.setItem(r, 2, QTableWidgetItem(str(h.get("total", 0))))
             t.setItem(r, 3, QTableWidgetItem(
-                f"{h.get('hits', 0)}（{h.get('ad', 0)} / {h.get('suspect', 0)}）"))
+                f"{h.get('hits', 0)}（{h.get('ad', 0)} / {h.get('suspect', 0)} / {h.get('error', 0)}）"))
             dur = h.get("duration", 0)
             t.setItem(r, 4, QTableWidgetItem(f"{dur:.1f}s" if isinstance(dur, (int, float)) else str(dur)))
         t.setMinimumHeight(300)
@@ -3553,6 +3415,8 @@ class HistoryDialog(MessageBoxBase):
         self.yesButton.setVisible(False)
         self.cancelButton.setText("关闭")
         self.widget.setMinimumWidth(680)
+        from workbench_ui import style_dialog
+        style_dialog(self)
 
 
 # ================================================================ 隔离区管理
@@ -3605,6 +3469,8 @@ class QuarantineDialog(MessageBoxBase):
         self.yesButton.setVisible(False)
         self.cancelButton.setText("关闭")
         self.widget.setMinimumWidth(760)
+        from workbench_ui import style_dialog
+        style_dialog(self)
         self.reload()
 
     def reload(self):
@@ -3626,8 +3492,10 @@ class QuarantineDialog(MessageBoxBase):
         return [self.entries[r]["dst"] for r in sorted(rows) if r < len(self.entries)]
 
     def _run(self, fn, dsts, verb):
-        if not dsts:
+        if not dsts or self.app._file_busy or self.app._disposing:
             return
+        self.app._file_busy = True
+        self.app._sync_actions()
         for b in (self.btn_rs, self.btn_dl, self.btn_ra):
             b.setEnabled(False)
 
@@ -3741,6 +3609,7 @@ def gui_func_test() -> int:
 
     qapp = QApplication.instance() or QApplication([])
     app = run_gui(return_app=True)
+    app._quarantine_override = tmp / 'quarantine'
     app._ask = lambda title, content: True
     app._info = lambda title, content: None
     app._toast = lambda content, ok=True: None
@@ -4042,9 +3911,8 @@ def gui_func_test() -> int:
         check("处置完成状态", "处置完成" in app.status.text(), app.status.text())
         check("网格随处置移除", len(app.items) == 0, f"items={len(app.items)}")
         check("网格已清空", app.model.rowCount() == 0)
-        q_root = Path(str(scan_dir)).anchor
-        ipath = Path(q_root) / af.QUARANTINE_NAME
-        check("隔离区指向扫描根盘根", ipath.exists(), str(ipath))
+        ipath = app._quarantine_root()
+        check("隔离区指向专用测试目录", ipath == tmp / 'quarantine' and ipath.exists(), str(ipath))
         man = ipath / "manifest.json" if ipath.exists() else Path("_none_")
         n_added = 0
         if man.exists():
@@ -4198,7 +4066,7 @@ def gui_func_test() -> int:
         check("撤销处置完成", "恢复" in app.status.text(), app.status.text())
         check("撤销后文件回原位", all(Path(p).exists() for p in undo_srcs) and len(undo_srcs) > 0,
               f"n={len(undo_srcs)}")
-        ipath2 = Path(Path(str(slow_dir)).anchor) / af.QUARANTINE_NAME
+        ipath2 = app._quarantine_root()
         try:
             if ipath2.exists():
                 leftovers = [p for p in ipath2.rglob("*") if p.is_file() and p.name != "manifest.json"]
@@ -4310,7 +4178,7 @@ def gui_func_test() -> int:
 
         # —— 单一固定布局：无侧栏（导航与顶栏/底栏重复，用户决定删除），详情常驻 + 底部停靠 ——
         check("固定布局：无侧栏", app.lm.sidebar is None)
-        check("固定布局：详情常驻", app.detail.isVisible() and app.detail.width() == 360,
+        check("固定布局：详情常驻", app.detail.isVisible() and 320 <= app.detail.width() <= 520,
               f"w={app.detail.width()}")
         check("固定布局：底部停靠", app.lm._float_bar is None)
         check("固定布局：无布局按钮", not hasattr(app, "btn_layout"))
@@ -4339,9 +4207,9 @@ def gui_func_test() -> int:
         check("框选 overlay 配色为品牌橙", "217,119,87" in app._sel_band.styleSheet(),
               app._sel_band.styleSheet()[:50])
         # 锁死"QColor 不能直接吃 rgba 浮点 alpha"这个坑（曾致选中卡整卡被刷黑）
-        _c = _qc("rgba(217,119,87,0.06)")
-        check("颜色解析 rgba 浮点 alpha", _c.isValid() and _c.red() == 217 and _c.alpha() == 15,
-              str(_c.getRgb()))
+        parsed_color = _qc("rgba(217,119,87,0.06)")
+        check("颜色解析 rgba 浮点 alpha", parsed_color.isValid() and parsed_color.red() == 217 and parsed_color.alpha() == 15,
+              str(parsed_color.getRgb()))
         check("颜色解析 hex 正常", _qc("#FFFFFF").getRgb() == (255, 255, 255, 255))
         if app.model.items:
             import pathlib as _pl
@@ -4404,6 +4272,7 @@ def gui_func_test() -> int:
         check("详情徽标含判定文字", "广告" in app.detail_badge.text())
 
     finally:
+        app._cache.conn.close()
         app.close()
         qapp.processEvents()
         af.CACHE_PATH, af.CONFIG_PATH, af.LOG_PATH, af.HISTORY_PATH = _c, _cf, _l, _h

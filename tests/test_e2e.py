@@ -9,10 +9,12 @@ import ad_filter as af
 import ad_filter_gui
 tmp = Path(tempfile.mkdtemp(prefix="ad_e2e_"))
 af.CACHE_PATH = tmp/"c.db"; af.CONFIG_PATH = tmp/"cfg.json"; af.LOG_PATH = tmp/"log.jsonl"
+af.HISTORY_PATH = tmp / 'history.json'
 af.CONFIG_PATH.write_text('{"ui_theme":"dark","workers":4}', encoding="utf-8")
 from PySide6.QtWidgets import QApplication
 qapp = QApplication.instance() or QApplication([])
 app = ad_filter_gui.run_gui(return_app=True)
+app._quarantine_override = tmp / 'quarantine'
 app.show()
 def pump(s):
     t0=time.time()
@@ -125,7 +127,7 @@ app.execute_disposal()
 ok = wait(lambda: not app._disposing and "处置完成" in app.status.text(), 60)
 ck("隔离处置完成", ok, app.status.text()[:30])
 ck("处置后列表减少", len(app.items) == n_before - n_checked, f"{n_before}->{len(app.items)}")
-q_root = Path(str(A.anchor)) / af.QUARANTINE_NAME
+q_root = app._quarantine_root()
 ck("隔离目录已创建", q_root.exists())
 # 恢复（restore_ui 现在是模态隔离区管理对话框；自动化用假对话框替代，
 # 对话框本身的条目化管理由 --gui-test 覆盖）
@@ -181,3 +183,4 @@ ck("正常关闭", True)
 
 print(f"\nE2E 结果：{len(R)}/{len(R)+len(F)} 通过" + ("" if not F else f"  ❌ 失败: {F}"))
 shutil.rmtree(tmp, ignore_errors=True)
+sys.exit(1 if F else 0)
