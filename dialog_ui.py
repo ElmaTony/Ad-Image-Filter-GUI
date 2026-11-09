@@ -52,7 +52,7 @@ class WorkbenchDialog(QDialog):
         self._escape.activated.connect(self.reject)
 
     def _confirm(self):
-        if self.validate():
+        if self.validate() and self.result() != QDialog.Accepted:
             self.accept()
 
     def validate(self):

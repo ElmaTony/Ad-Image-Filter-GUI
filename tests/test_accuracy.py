@@ -11,6 +11,7 @@ import numpy as np
 
 td = Path(tempfile.mkdtemp(prefix="ad_acc_"))
 af.CACHE_PATH = td/"c.db"; af.CONFIG_PATH = td/"cfg.json"; af.LOG_PATH = td/"l.jsonl"
+af.HISTORY_PATH = td / 'history.json'
 af.CONFIG_PATH.write_text('{"ui_theme":"dark","workers":8}', encoding="utf-8")
 F = af._load_font
 rng = np.random.default_rng(11)

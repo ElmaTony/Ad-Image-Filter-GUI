@@ -75,6 +75,7 @@ class ThumbCache(QObject):
         self._lock = threading.Lock()
         self._q = queue.Queue()
         self._stopped = False
+        self._generation = 0
         self._threads = [threading.Thread(target=self._worker, daemon=True) for _ in range(3)]
         for t in self._threads:
             t.start()
@@ -89,34 +90,47 @@ class ThumbCache(QObject):
             if path in self._pending:
                 return None
             self._pending.add(path)
-        self._q.put(path)
+            generation = self._generation
+        self._q.put((generation, path))
         return None
+
+    def clear(self):
+        with self._lock:
+            self._generation += 1
+            self._cache.clear()
+            self._pending.clear()
+            self._failed.clear()
 
     def _worker(self):
         while not self._stopped:
             try:
-                path = self._q.get(timeout=0.5)
+                job = self._q.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if path is None or self._stopped:
+            if job is None or self._stopped:
                 return
+            generation, path = job
+            if generation != self._generation:
+                continue
             try:
                 from PIL import ImageOps
                 img = af.load_pixel_image(Path(path), self._size)
                 img = ImageOps.contain(img, (self._size, self._size))
                 rgb = img.convert("RGB")
                 try:
-                    self._sig_store.emit((path, rgb.tobytes(), rgb.width, rgb.height, False))
+                    self._sig_store.emit((generation, path, rgb.tobytes(), rgb.width, rgb.height, False))
                 except RuntimeError:
                     return  # 对象已销毁（关窗瞬间）
             except Exception:
                 try:
-                    self._sig_store.emit((path, None, 0, 0, True))
+                    self._sig_store.emit((generation, path, None, 0, 0, True))
                 except RuntimeError:
                     return
 
     def _on_store(self, data):
-        path, buf, w, h, failed = data
+        generation, path, buf, w, h, failed = data
+        if generation != self._generation:
+            return
         if failed:
             self._mark_failed(path)
         else:
@@ -714,6 +728,7 @@ class Lightbox(QWidget):
         self._drag_tx0 = self._drag_ty0 = 0.0
         self._press_pos = None
         self._enter = 1.0   # 入场动画进度（showEvent 里从 0 渐到 1）
+        self._controls_visible = True
         self._load(path)
         # 底部右侧：图内直接处置按钮（A 标广告 / K 保留）
         self.btn_ad = QPushButton("标记广告 (A)", self)
@@ -730,6 +745,10 @@ class Lightbox(QWidget):
             " border-radius: 14px; padding: 6px 16px; font-size: 12px; }"
             "QPushButton:hover { background: rgba(255,255,255,0.24); }")
         self.btn_keep.clicked.connect(lambda: self._mark(False))
+        self.btn_clean = QPushButton('纯净查看 (F)', self)
+        self.btn_clean.setCursor(Qt.PointingHandCursor)
+        self.btn_clean.setStyleSheet(self.btn_keep.styleSheet())
+        self.btn_clean.clicked.connect(self.toggle_controls)
         self._place_mark_btns()
         # 覆盖主窗口
         if parent is not None:
@@ -763,6 +782,7 @@ class Lightbox(QWidget):
 
     def _load(self, path):
         self.path = path
+        self.setWindowTitle(f'大图查看 · {Path(path).name}')
         from PIL import Image as _Im, ImageOps as _IO
         try:
             with _Im.open(path) as im:
@@ -789,6 +809,21 @@ class Lightbox(QWidget):
         self.btn_ad.setGeometry(self.width() - 18 - w_keep - 10 - w_ad, y, w_ad, 32)
         self.btn_ad.raise_()
         self.btn_keep.raise_()
+        self.btn_clean.setGeometry(self.width() - 180, 14, 120, 30)
+        self.btn_clean.raise_()
+
+    def toggle_controls(self):
+        self._controls_visible = not self._controls_visible
+        for button in (self.btn_ad, self.btn_keep, self.btn_clean):
+            button.setVisible(self._controls_visible)
+        self._clamp_translate()
+        self.update()
+
+    def _image_rect(self):
+        """工具栏和翻页热区之外的图片视口；纯净模式使用整个窗口。"""
+        if not self._controls_visible:
+            return self.rect()
+        return QRect(52, 66, max(1, self.width() - 104), max(1, self.height() - 136))
 
     def _mark(self, as_ad):
         self.app.mark_path(self.path, as_ad)
@@ -802,11 +837,13 @@ class Lightbox(QWidget):
         super().resizeEvent(e)
         if hasattr(self, "btn_ad"):
             self._place_mark_btns()
+            self._clamp_translate()
 
     def _fit(self):
         if not self._pix or self._pix.isNull():
             return
-        vw, vh = self.width(), self.height()
+        viewport = self._image_rect()
+        vw, vh = viewport.width(), viewport.height()
         iw, ih = self._pix.width(), self._pix.height()
         s = min(vw / iw, vh / ih)
         self._fit_w, self._fit_h = iw * s, ih * s
@@ -823,11 +860,11 @@ class Lightbox(QWidget):
             self._draw_chrome(p)
             return
         self._fit()
-        w = self._fit_w * self.scale
-        h = self._fit_h * self.scale
-        cx = self.width() / 2 + self.tx
-        cy = self.height() / 2 + self.ty
+        viewport = self._image_rect()
+        cx = viewport.x() + viewport.width() / 2 + self.tx
+        cy = viewport.y() + viewport.height() / 2 + self.ty
         p.save()
+        p.setClipRect(viewport)
         p.translate(cx, cy)
         # 内容入场（250ms scale 0.92→1 + 渐显，官方 lightbox-content-in）
         es = 0.92 + 0.08 * self._enter
@@ -841,6 +878,8 @@ class Lightbox(QWidget):
 
     def _draw_chrome(self, p):
         """顶部文件名 + 右上关闭；底部判定信息条。"""
+        if not self._controls_visible:
+            return
         it = self._it()
         name = Path(self.path).name
         p.setPen(Qt.NoPen)
@@ -850,12 +889,12 @@ class Lightbox(QWidget):
         # 顶部左：文件名
         p.setPen(QColor("#e8e6e0"))
         p.setFont(QFont("Microsoft YaHei UI", 10))
-        p.drawText(QRect(20, 9, self.width() - 140, 24), Qt.AlignLeft | Qt.AlignVCenter,
-                   QFontMetrics(p.font()).elidedText(name, Qt.ElideMiddle, self.width() - 140))
+        p.drawText(QRect(20, 9, self.width() - 220, 24), Qt.AlignLeft | Qt.AlignVCenter,
+                   QFontMetrics(p.font()).elidedText(name, Qt.ElideMiddle, self.width() - 220))
         p.setPen(QColor('#aaa59c'))
         p.setFont(QFont('Microsoft YaHei UI', 8))
         p.drawText(QRect(20, 32, self.width() - 140, 18), Qt.AlignLeft | Qt.AlignVCenter,
-                   f'大图审查   ·   缩放 {self.scale:.0%}   ·   ← → 切换   ·   Esc 关闭')
+                   f'大图审查   ·   缩放 {self.scale:.0%}   ·   ← → 切换   ·   F 纯净查看   ·   Esc 关闭')
         # 右上：关闭
         cr = QRect(self.width() - 46, 14, 30, 30)
         p.setPen(QPen(QColor(255, 255, 255, 130), 1.4))
@@ -894,8 +933,11 @@ class Lightbox(QWidget):
             p.drawLine(tail, mid_y + 9, x, mid_y)
 
     def wheelEvent(self, e):
+        if not self._pix or self._pix.isNull() or not self._image_rect().contains(int(e.position().x()), int(e.position().y())):
+            return
         import math
-        factor = math.exp(-e.angleDelta().y() * self.WHEEL_FACTOR)
+        self._fit()
+        factor = math.exp(max(-6, min(6, -e.angleDelta().y() * self.WHEEL_FACTOR)))
         old = self.scale
         max_scale = max(2.0, (self._pix.width() / max(1, self._fit_w)))
         self.scale = max(0.5, min(max_scale * 1.2, self.scale * factor))
@@ -903,7 +945,8 @@ class Lightbox(QWidget):
             self.scale = 1.0
         # 光标锚点（以指针位置为不动点）
         pos = e.position()
-        cx, cy = self.width() / 2, self.height() / 2
+        viewport = self._image_rect()
+        cx, cy = viewport.x() + viewport.width() / 2, viewport.y() + viewport.height() / 2
         ox, oy = pos.x() - cx, pos.y() - cy
         c = self.scale / old if old else 1
         self.tx = ox - (ox - self.tx) * c
@@ -913,16 +956,19 @@ class Lightbox(QWidget):
 
     def _clamp_translate(self):
         self._fit()
-        max_tx = max(0.0, (self._fit_w * self.scale - self.width()) / 2)
-        max_ty = max(0.0, (self._fit_h * self.scale - self.height()) / 2)
+        viewport = self._image_rect()
+        max_tx = max(0.0, (self._fit_w * self.scale - viewport.width()) / 2)
+        max_ty = max(0.0, (self._fit_h * self.scale - viewport.height()) / 2)
         self.tx = max(-max_tx, min(max_tx, self.tx))
         self.ty = max(-max_ty, min(max_ty, self.ty))
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
             # 关闭按钮
-            if QRect(self.width() - 46, 14, 30, 30).contains(e.position().toPoint()):
+            if self._controls_visible and QRect(self.width() - 46, 14, 30, 30).contains(e.position().toPoint()):
                 self.close()
+                return
+            if not self._image_rect().contains(e.position().toPoint()):
                 return
             self._press_pos = e.position()
             self._drag_start = e.position()
@@ -941,7 +987,7 @@ class Lightbox(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, e):
-        if not self._dragging:
+        if self._controls_visible and not self._dragging and self._image_rect().top() <= e.position().y() <= self._image_rect().bottom():
             # 未拖拽且点击左右箭头 → 切换
             x = e.position().x()
             if x < 48:
@@ -953,12 +999,15 @@ class Lightbox(QWidget):
 
     def mouseDoubleClickEvent(self, e):
         pos = e.position()
+        if not self._pix or self._pix.isNull() or not self._image_rect().contains(int(pos.x()), int(pos.y())):
+            return
         x = pos.x()
         # 箭头热区（左 48px / 右 48px）里连续点击是"快速翻页"，**绝不能当双击缩放**——
         # 翻页已由 mouseReleaseEvent 处理，这里直接吞掉（用户报"连点下一张会放大图"）
-        if x < 48 or x > self.width() - 48:
+        if self._controls_visible and (x < 48 or x > self.width() - 48):
             return
-        cx, cy = self.width() / 2, self.height() / 2
+        viewport = self._image_rect()
+        cx, cy = viewport.x() + viewport.width() / 2, viewport.y() + viewport.height() / 2
         ox, oy = pos.x() - cx, pos.y() - cy
         if self.scale > 1.0:
             self.scale, self.tx, self.ty = 1.0, 0.0, 0.0
@@ -1016,6 +1065,8 @@ class Lightbox(QWidget):
             self._mark(True)
         elif k == Qt.Key_K:
             self._mark(False)
+        elif k == Qt.Key_F:
+            self.toggle_controls()
 
 
 class Segmented(QWidget):
@@ -2107,6 +2158,7 @@ class App(FramelessWindow):
         self.pause.clear()
         self.btn_pause.setEnabled(True)
         self.btn_pause.setText("暂停")
+        self.thumbs.clear()
         self.items.clear()
         self.checked.clear()
         self.model.checked.clear()
@@ -2168,6 +2220,7 @@ class App(FramelessWindow):
         similar = None
         qop = None
         cached_n = None
+        scan_error = None
         folder_updated = False
         current_hit = False
         try:
@@ -2212,6 +2265,8 @@ class App(FramelessWindow):
                     qop = payload
                 elif kind == "done":
                     done = True
+                elif kind == 'scan_error':
+                    scan_error = payload
         except queue.Empty:
             pass
         except Exception:
@@ -2231,7 +2286,15 @@ class App(FramelessWindow):
                     self.set_status(f"{latest_progress}/{self.total_files}{cached_hint} · 命中 {len(self.items)}")
             if folder_updated or latest_progress is not None or current_hit:
                 self.folder_bar.update_progress()
-            if cancelled:
+            if scan_error is not None:
+                self.dot.set_state('ready')
+                self.pause.clear()
+                self._current_file = self._current_root = None
+                self.folder_bar.update_progress()
+                self.set_status('扫描失败，请查看提示后重试')
+                self._log(f'扫描失败：{scan_error}')
+                self._info('扫描失败', scan_error)
+            elif cancelled:
                 self.btn_scan.setEnabled(True)
                 self.btn_pause.setEnabled(False)
                 self.btn_pause.setText("暂停")
@@ -2396,6 +2459,7 @@ class App(FramelessWindow):
 
     def refresh(self):
         current = self._current_item()
+        previous_row = max(0, self.grid.currentIndex().row())
         current_path = current['path'] if current else None
         self.model.reset_items(self._sorted_items([it for it in self.items if self._passes_filter(it)]))
         self._sync_fade_visibility()
@@ -2403,7 +2467,8 @@ class App(FramelessWindow):
         self.grid.viewport().update()
         self._update_count_label()
         if self.model.items:
-            row = next((i for i, it in enumerate(self.model.items) if it['path'] == current_path), 0)
+            row = next((i for i, it in enumerate(self.model.items) if it['path'] == current_path),
+                       min(previous_row, len(self.model.items) - 1))
             self.grid.setCurrentIndex(self.model.index(row, 0))
         else:
             self._pending_preview = self._preview_path = None
@@ -2542,8 +2607,9 @@ class App(FramelessWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def _apply_similar(self, groups):
-        if not self.items:
-            return  # 处置后延迟到达的相似消息：结果已清空，忽略
+        live = {it['path'] for it in self.items}
+        groups = [[path for path in group if path in live] for group in groups]
+        groups = [group for group in groups if len(group) >= 2]
         self.similar_groups = groups
         self._sim_map = {p: i for i, g in enumerate(groups) for p in g}
         self.model.sim_map = self._sim_map
@@ -2725,7 +2791,10 @@ class App(FramelessWindow):
             self.model.checked.discard(gone)
             self.checked = self.model.checked
             self.refresh()
-        self.step(1)
+        if as_ad:
+            self.step(1)
+        else:
+            self._apply_similar(self.similar_groups)
         return self
 
     def mark_path(self, path, as_ad):
@@ -2747,6 +2816,7 @@ class App(FramelessWindow):
             if hasattr(self, "_stat_cache"):
                 self._stat_cache.pop(path, None)
             self.refresh()
+            self._apply_similar(self.similar_groups)
             self._log(f"标记保留：{Path(path).name}")
         return self
 
@@ -2827,6 +2897,8 @@ class App(FramelessWindow):
                     moved, errors, ok_paths = af.apply_recycle(checked_items, af.log_jsonl)
                 else:
                     moved, errors, ok_paths = af.apply_delete(checked_items, af.log_jsonl)
+            except Exception as e:
+                errors.append(str(e))
             finally:
                 self.scan_q.put(("disposed", (mode, moved, errors, ok_paths,
                                               str(q_root) if q_root else None)))
@@ -2874,11 +2946,6 @@ class App(FramelessWindow):
         if self._disposing or self._file_busy or (self.scan_thread and self.scan_thread.is_alive()):
             return self
         q_root = self._quarantine_root()
-        if not q_root.exists():
-            d = QFileDialog.getExistingDirectory(self, "选择隔离目录（含 manifest.json）")
-            if not d:
-                return self
-            q_root = Path(d)
         self._qdlg = QuarantineDialog(self, q_root)
         try:
             self._qdlg.exec()
@@ -3344,7 +3411,7 @@ class RuleEditorLite(WorkbenchDialog):
                     w_it = t.item(r, 2)
                     try:
                         rule["weight"] = max(1, int(float((w_it.text() if w_it else "1").strip() or 1)))
-                    except ValueError:
+                    except (ValueError, OverflowError):
                         continue
                 rules.append(rule)
             out[key] = rules
@@ -3381,7 +3448,6 @@ class RuleEditorLite(WorkbenchDialog):
         name = self.t_name.text().strip()
         ocr_cfg = self.cfg.get("ocr", {})
         high = float(ocr_cfg.get("score_high", 6))
-        low = float(ocr_cfg.get("score_low", 3))
         lines = []
 
         wl_hits = af.match_rules(name, rules.get("whitelist_rules", [])) if name else []
@@ -3394,13 +3460,13 @@ class RuleEditorLite(WorkbenchDialog):
             verdict, vtext = "ad", "广告（文件名规则命中）"
         elif score >= high:
             verdict, vtext = "ad", f"广告（{score:.0f} ≥ 阈值 {high:.0f}）"
-        elif score >= low:
-            verdict, vtext = "suspect", f"疑似（{score:.0f} ≥ 阈值 {low:.0f}）"
+        elif hits:
+            verdict, vtext = "suspect", f"疑似（词库命中，{score:.0f} 未达到广告阈值 {high:.0f}）"
         else:
-            verdict, vtext = "clean", f"正常（{score:.0f} < 阈值 {low:.0f}）"
+            verdict, vtext = "clean", "正常（词库未命中）"
 
         lines.append(f"判定：{vtext}")
-        lines.append(f"OCR 得分：{score:.0f}（广告 ≥{high:.0f} / 疑似 ≥{low:.0f}）")
+        lines.append(f"OCR 得分：{score:.0f}（广告 ≥{high:.0f}；低于广告阈值的词库命中记疑似）")
         if wl_hits:
             lines.append("\n白名单命中：")
             lines += [f"  · {h['label']}（{h['detail']}）" for h in wl_hits]
@@ -3453,7 +3519,7 @@ class RuleEditorLite(WorkbenchDialog):
                     w_it = t.item(r, 2)
                     try:
                         rule["weight"] = max(1, int(float((w_it.text() if w_it else "1").strip() or 1)))
-                    except ValueError:
+                    except (ValueError, OverflowError):
                         bad.append(f"{label} 第{r + 1}行：权重须为数字")
                         continue
                 rules.append(rule)

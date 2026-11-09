@@ -160,6 +160,92 @@ class WorkbenchTests(unittest.TestCase):
         self.assertFalse(self.app.info.toPlainText())
         self.assertEqual(self.app.preview_index.text(), '— / —')
 
+    def test_lightbox_photo_edges_zoom_panning_and_clean_view(self):
+        from PySide6.QtTest import QTest
+        from PySide6.QtCore import QPointF
+        from PIL import ImageDraw
+        for size in ((900, 1600), (1700, 650), (1000, 1000)):
+            path = self.root / 'edge_check.png'
+            image = Image.new('RGB', size, '#546868')
+            ImageDraw.Draw(image).rectangle((0, 0, size[0]-1, size[1]-1), outline='#ff0000', width=25)
+            image.save(path)
+            viewer = gui.Lightbox(self.app, str(path), self.app)
+            viewer.resize(1080, 680)
+            self.pump(.3)
+            viewer._fit()
+            viewport = viewer._image_rect()
+            self.assertLessEqual(viewer._fit_w, viewport.width() + .01)
+            self.assertLessEqual(viewer._fit_h, viewport.height() + .01)
+            screenshot = viewer.grab().toImage()
+            dpr = screenshot.devicePixelRatio()
+            cx = viewport.x() + viewport.width()/2
+            cy = viewport.y() + viewport.height()/2
+            for x, y in ((cx, cy-viewer._fit_h/2+2), (cx, cy+viewer._fit_h/2-3),
+                         (cx-viewer._fit_w/2+2, cy), (cx+viewer._fit_w/2-3, cy)):
+                pixel = screenshot.pixelColor(int(x*dpr), int(y*dpr))
+                self.assertGreater(pixel.red(), 200, 'photo edge hidden by controls')
+                self.assertLess(pixel.green(), 40)
+            viewer.scale = 3
+            viewer.tx = viewer.ty = 100000
+            viewer._clamp_translate()
+            self.assertAlmostEqual(viewer.ty, max(0, (viewer._fit_h*3-viewport.height())/2))
+            self.assertAlmostEqual(viewer.tx, max(0, (viewer._fit_w*3-viewport.width())/2))
+            QTest.keyClick(viewer, Qt.Key_F)
+            self.assertEqual(viewer._image_rect(), viewer.rect())
+            self.assertFalse(viewer.btn_keep.isVisible())
+            QTest.keyClick(viewer, Qt.Key_F)
+            self.assertTrue(viewer.btn_keep.isVisible())
+            viewer.close()
+            self.pump(.05)
+        missing = gui.Lightbox(self.app, str(self.root / 'missing.png'), self.app)
+        class Wheel:
+            def position(self): return QPointF(200, 200)
+        missing.wheelEvent(Wheel())  # 无效图片不再因访问 _pix.width() 崩溃。
+        missing.close()
+
+    def test_scan_error_recovers_controls_without_recording_history(self):
+        self.app.scan_q.put(('scan_error', '测试模型加载失败'))
+        self.app._poll_queue()
+        self.assertIn('扫描失败', self.app.status.text())
+        self.assertTrue(self.app.btn_scan.isEnabled())
+        self.assertEqual(af.load_history(), [])
+
+    def test_keep_retains_next_photo_and_late_similarity_ignores_removed_paths(self):
+        self.app.grid.setCurrentIndex(self.app.model.index(2, 0))
+        self.app.mark_current(False)
+        self.assertEqual(self.app._current_item()['path'], self.rows[3]['path'])
+        self.app._apply_similar([[self.rows[2]['path'], self.rows[3]['path']]])
+        self.assertEqual(self.app.similar_groups, [])
+        self.app.items = []
+        self.app._apply_similar([[self.rows[0]['path'], self.rows[1]['path']]])
+        self.assertEqual(self.app.similar_groups, [])
+        self.assertFalse(self.app.model.sim_map)
+
+    def test_rule_tester_low_score_matches_scan_and_nonfinite_weight_rejected(self):
+        from PySide6.QtWidgets import QTableWidgetItem
+        dialog = self.app.build_rule_editor()
+        dialog.show_errors = False
+        dialog.t_in.setPlainText('频道')
+        dialog._run_test()
+        self.assertIn('疑似', dialog.t_out.toPlainText())
+        table = dialog._pages['ocr_keywords']['table']
+        table.setItem(0, 2, QTableWidgetItem('inf'))
+        self.assertFalse(dialog.do_save())
+        dialog.close()
+
+    def test_thumbnail_reset_retries_failures_and_ignores_old_scan_results(self):
+        thumbs = self.app.thumbs
+        old_generation = thumbs._generation
+        path = self.rows[0]['path']
+        thumbs._mark_failed(path)
+        self.assertIn(path, thumbs._failed)
+        thumbs.clear()
+        self.assertNotIn(path, thumbs._failed)
+        thumbs._on_store((old_generation, path, None, 0, 0, True))
+        self.assertNotIn(path, thumbs._failed)
+        thumbs.get(path)
+        self.assertTrue(self.pump(until=lambda: path in thumbs._cache))
+
     def test_theme_and_task_controls(self):
         self.app.toggle_theme()
         self.pump(.4)

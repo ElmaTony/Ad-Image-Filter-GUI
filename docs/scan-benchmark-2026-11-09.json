@@ -1,0 +1,30 @@
+{
+  "baseline": "24389df",
+  "synthetic": 12,
+  "local_readonly": 7,
+  "runs": {
+    "before_serial": {
+      "seconds": 7.803,
+      "ocr_calls": 56,
+      "images": 19
+    },
+    "after_serial": {
+      "seconds": 5.284,
+      "ocr_calls": 44,
+      "images": 19
+    },
+    "before_parallel": {
+      "seconds": 3.678,
+      "ocr_calls": 56,
+      "images": 19
+    },
+    "after_parallel": {
+      "seconds": 2.54,
+      "ocr_calls": 44,
+      "images": 19
+    }
+  },
+  "identical": true,
+  "serial_speedup": 1.477,
+  "parallel_speedup": 1.448
+}

@@ -312,7 +312,7 @@ class CDSProgress(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(T.c(self.dark, T.muted)))
+        p.setBrush(QColor(T.c(self.dark, TT.muted)))
         p.drawRoundedRect(QRectF(0, 0, self.width(), 4), 2, 2)
         if self._indet:
             g = QLinearGradient(0, 0, self.width(), 0)
@@ -456,7 +456,7 @@ class CDSSkeleton(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(T.c(self.dark, T.muted)))
+        p.setBrush(QColor(T.c(self.dark, TT.muted)))
         p.drawRoundedRect(QRectF(self.rect()), self.radius, self.radius)
         p.setClipRect(self.rect())
         # CDS 原文：2s linear、105deg、transparent 35% → sheen 50% → transparent 65%
@@ -466,7 +466,7 @@ class CDSSkeleton(QWidget):
         x = -self.height() + self._p * span * 1.6
         g = QLinearGradient(x, 0, x + self.height() * math.cos(rad) + 40,
                             self.height() * math.sin(rad))
-        c = QColor(T.c(self.dark, T.text_3))
+        c = QColor(T.c(self.dark, TT.text_3))
         c.setAlphaF(0.14)
         g.setColorAt(0, QColor(0, 0, 0, 0))
         g.setColorAt(0.5, c)
