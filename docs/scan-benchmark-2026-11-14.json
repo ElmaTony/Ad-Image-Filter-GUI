@@ -1,0 +1,44 @@
+{
+  "baseline": "80c3de3",
+  "synthetic": 12,
+  "local_readonly": 7,
+  "runs": {
+    "before_serial": {
+      "seconds": 6.0,
+      "ocr_calls": 44,
+      "images": 19
+    },
+    "after_serial": {
+      "seconds": 4.986,
+      "ocr_calls": 44,
+      "images": 19
+    },
+    "before_parallel": {
+      "seconds": 2.698,
+      "ocr_calls": 44,
+      "images": 19
+    },
+    "after_parallel": {
+      "seconds": 2.733,
+      "ocr_calls": 44,
+      "images": 19
+    }
+  },
+  "identical": true,
+  "serial_speedup": 1.203,
+  "parallel_speedup": 0.987,
+  "similarity_comparison_only": {
+    "2000": {
+      "before_seconds": 0.08,
+      "after_seconds": 0.0234
+    },
+    "8000": {
+      "before_seconds": 1.2963,
+      "after_seconds": 0.1332
+    }
+  },
+  "quarantine_500_files": {
+    "before_seconds": 1.8764,
+    "after_seconds": 1.6675
+  }
+}

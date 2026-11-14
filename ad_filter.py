@@ -34,6 +34,10 @@ import sys
 import threading
 import time
 import tempfile
+import math
+import hashlib
+from contextlib import contextmanager
+from functools import wraps
 import unicodedata
 from pathlib import Path
 
@@ -90,18 +94,82 @@ DEFAULT_CONFIG = {
 }
 
 
+def normalize_config(user: dict) -> dict:
+    """配置导入和启动共用的类型边界；先验证副本，再交给界面和引擎。"""
+    if not isinstance(user, dict):
+        raise ValueError('配置须为 JSON 对象')
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    for key, value in user.items():
+        if isinstance(cfg.get(key), dict):
+            if not isinstance(value, dict):
+                raise ValueError(f'{key} 须为配置对象')
+            cfg[key].update(value)
+        else:
+            cfg[key] = copy.deepcopy(value)
+
+    def number(container, key, low, high, integer=False):
+        raw = container[key]
+        if isinstance(raw, bool):
+            raise ValueError(f'{key} 须为数字')
+        value = float(raw)
+        if not math.isfinite(value) or not low <= value <= high or (integer and not value.is_integer()):
+            raise ValueError(f'{key} 超出允许范围 {low}–{high}')
+        container[key] = int(value) if integer else value
+
+    def boolean(container, key):
+        if not isinstance(container[key], bool):
+            raise ValueError(f'{key} 须为 true 或 false')
+
+    number(cfg, 'workers', 1, 256, True)
+    number(cfg['phash'], 'threshold', 0, 64, True)
+    number(cfg['shape'], 'min_side', 1, 100000, True)
+    for key in ('max_ratio', 'max_ratio_hard'):
+        number(cfg['shape'], key, 1, 100000)
+    for key, low, high, integer in (
+            ('strip_ratio', .001, 1, False), ('max_dim', 32, 100000, True),
+            ('score_high', .001, 1000000, False), ('score_low', .001, 1000000, False)):
+        number(cfg['ocr'], key, low, high, integer)
+    thresholds = cfg['ocr']['bright_thresholds']
+    if not isinstance(thresholds, list):
+        raise ValueError('bright_thresholds 须为数字列表')
+    cfg['ocr']['bright_thresholds'] = list(thresholds)
+    for i in range(len(thresholds)):
+        number(cfg['ocr']['bright_thresholds'], i, 0, 255, True)
+    for section in ('ocr', 'qr', 'phash'):
+        boolean(cfg[section], 'enabled')
+    boolean(cfg['ocr'], 'full_image_if_nothing')
+    for key in ('_enable_filename', '_enable_shape'):
+        if key in cfg:
+            boolean(cfg, key)
+    for key in ('filename_rules', 'ocr_keywords', 'whitelist_rules'):
+        rules = cfg[key]
+        if not isinstance(rules, list):
+            raise ValueError(f'{key} 须为规则列表')
+        for rule in rules:
+            if not isinstance(rule, dict) or not isinstance(rule.get('pattern'), str):
+                raise ValueError(f'{key} 包含无效规则')
+            re.compile(rule['pattern'])
+            if 'label' in rule and not isinstance(rule['label'], str):
+                raise ValueError('规则名称须为文本')
+            if key == 'ocr_keywords':
+                rule.setdefault('weight', 1)
+                number(rule, 'weight', 1, 10000)
+    if cfg['disposal'] not in ('quarantine', 'recycle', 'delete'):
+        raise ValueError('处置方式无效')
+    if not isinstance(cfg['quarantine_dir'], str):
+        raise ValueError('隔离目录须为路径文本')
+    locations = cfg['quarantine_locations']
+    if not isinstance(locations, list) or not all(isinstance(p, str) and Path(p).is_absolute() for p in locations):
+        raise ValueError('隔离区历史目录须为完整路径列表')
+    return cfg
+
+
 def load_config() -> dict:
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     if CONFIG_PATH.exists():
         try:
             user = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            for k, v in user.items():
-                if k in ("filename_rules", "ocr_keywords", "whitelist_rules"):
-                    cfg[k] = v
-                elif isinstance(v, dict) and isinstance(cfg.get(k), dict):
-                    cfg[k].update(v)
-                else:
-                    cfg[k] = v
+            cfg = normalize_config(user)
         except Exception as e:
             print(f"配置读取失败，使用默认配置：{e}")
     # —— 旧配置迁移：历史版本把 max_dim 写成 2200（当时默认值），比现默认 1600 慢一倍多，
@@ -118,6 +186,16 @@ def load_config() -> dict:
     except Exception:
         pass
     return cfg
+
+
+def result_signature(cfg, enable=None):
+    keys = ('filename_rules', 'ocr_keywords', 'whitelist_rules', 'shape', 'qr', 'ocr')
+    switches = dict(filename=enable.get('filename', True), shape=enable.get('shape', True),
+                    qr=enable.get('qr', False), ocr=enable.get('ocr', False)) if enable is not None else dict(
+        filename=cfg.get('_enable_filename', True), shape=cfg.get('_enable_shape', True),
+        qr=cfg['qr']['enabled'], ocr=cfg['ocr']['enabled'])
+    blob = dict(config={k: cfg.get(k) for k in keys}, enable=switches, revision=2)
+    return hashlib.sha256(json.dumps(blob, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
 
 
 def save_config(cfg: dict) -> None:
@@ -159,19 +237,22 @@ class Cache:
             "CREATE TABLE IF NOT EXISTS hashes(path TEXT PRIMARY KEY, size INTEGER, mtime REAL, hash INTEGER)"
         )
         self.conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
+        if 'cfg_hash' not in {row[1] for row in self.conn.execute('PRAGMA table_info(results)')}:
+            try:
+                self.conn.execute("ALTER TABLE results ADD COLUMN cfg_hash TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                if 'cfg_hash' not in {row[1] for row in self.conn.execute('PRAGMA table_info(results)')}:
+                    raise
         self.conn.commit()
         self.lock = threading.Lock()
+        self.result_version = ''
 
-    def check_config_version(self, cfg: dict) -> bool:
+    def check_config_version(self, cfg: dict, enable=None) -> bool:
         """规则/阈值变更后自动清空缓存：旧判定是基于旧规则的，必须全量重判。
         返回 True=配置未变（缓存有效），False=已清空（需重判）。"""
-        import hashlib
-        keys = ("filename_rules", "ocr_keywords", "whitelist_rules",
-                "shape", "qr", "ocr")
-        blob = json.dumps({k: cfg.get(k) for k in keys},
-                          sort_keys=True, ensure_ascii=False)
-        h = hashlib.md5(blob.encode("utf-8")).hexdigest()
+        h = result_signature(cfg, enable)
         with self.lock:
+            self.result_version = h
             row = self.conn.execute("SELECT value FROM meta WHERE key='cfg_hash'").fetchone()
             if row and row[0] == h:
                 return True
@@ -180,17 +261,17 @@ class Cache:
             self.conn.commit()
         return False
 
-    def get(self, path: str, size: int, mtime: float):
+    def get(self, path: str, size: int, mtime: float, version=None):
         with self.lock:
             row = self.conn.execute(
-                "SELECT verdict, score, reasons, ocr_text FROM results WHERE path=? AND size=? AND mtime=?",
-                (path, size, mtime),
+                "SELECT verdict, score, reasons, ocr_text FROM results WHERE path=? AND size=? AND mtime=? AND cfg_hash=?",
+                (path, size, mtime, self.result_version if version is None else version),
             ).fetchone()
         if row and row[0] != 'error':
             return {"verdict": row[0], "score": row[1], "reasons": json.loads(row[2]), "ocr_text": row[3]}
         return None
 
-    def get_batch(self, file_infos: list[tuple[str, int, float]]) -> dict[str, dict]:
+    def get_batch(self, file_infos: list[tuple[str, int, float]], version=None) -> dict[str, dict]:
         """批量查询缓存：path+size+mtime 命中则返回 {path: result}。用于扫描秒开。
         分批查询：SQLite 的 SQL 变量数上限（32766）在大目录（数万张图）会被突破，
         一旦 OperationalError 冒出去整个扫描线程就崩了。"""
@@ -204,8 +285,8 @@ class Cache:
             ph = ",".join("?" * len(chunk))
             with self.lock:
                 rows = self.conn.execute(
-                    f"SELECT path, size, mtime, verdict, score, reasons, ocr_text FROM results WHERE path IN ({ph})",
-                    chunk,
+                    f"SELECT path, size, mtime, verdict, score, reasons, ocr_text FROM results WHERE path IN ({ph}) AND cfg_hash=?",
+                    chunk + [self.result_version if version is None else version],
                 ).fetchall()
             # Python 侧按 size+mtime 精确过滤（SQLite 不支持 tuple IN VALUES）
             for r in rows:
@@ -236,11 +317,12 @@ class Cache:
             ).fetchone()
         return (row[0] & ((1 << 64) - 1)) if row else None
 
-    def put(self, path: str, size: int, mtime: float, verdict: str, score: float, reasons: list, ocr_text: str):
+    def put(self, path: str, size: int, mtime: float, verdict: str, score: float, reasons: list, ocr_text: str, version=None):
         with self.lock:
             self.conn.execute(
-                "INSERT OR REPLACE INTO results VALUES(?,?,?,?,?,?,?,?)",
-                (path, size, mtime, verdict, score, json.dumps(reasons, ensure_ascii=False), ocr_text, time.time()),
+                "INSERT OR REPLACE INTO results VALUES(?,?,?,?,?,?,?,?,?)",
+                (path, size, mtime, verdict, score, json.dumps(reasons, ensure_ascii=False), ocr_text, time.time(),
+                 self.result_version if version is None else version),
             )
 
     def commit(self):
@@ -342,12 +424,8 @@ def _bright_from_mask(mask) -> Image.Image:
 
 
 def is_blank_image(img: Image.Image) -> bool:
-    """近乎纯色（灰度标准差 < 3）：不可能含可读文字，跳过 QR/OCR 完全无损。
-    实测：纯色图 std=0.00，真实照片最低 10.1（横条贴片）。"""
-    import numpy as np
-
-    g = np.asarray(img.convert("L").resize((160, 120)), dtype=np.float32)
-    return float(g.std()) < 3.0
+    """只有每个 RGB 通道均完全一致时才跳过；稀疏文字和等亮度色差不能跳过。"""
+    return all(low == high for low, high in img.convert('RGB').getextrema())
 
 
 def bright_mask_ratio(img: Image.Image, thr: int) -> float:
@@ -371,6 +449,20 @@ def load_pixel_image(path: Path, max_dim: int) -> Image.Image:
     if max(img.size) > max_dim:
         img = ImageOps.contain(img, (max_dim, max_dim))
     return img
+
+
+def load_display_image(path: Path, max_dim=None):
+    """显示专用方向处理；不更改识别通道的像素、尺寸或算法。"""
+    with Image.open(path) as im:
+        original = im.size
+        if im.getexif().get(274) in (5, 6, 7, 8):
+            original = original[::-1]
+        if max_dim is not None:
+            im.draft('RGB', (max_dim, max_dim))
+        image = ImageOps.exif_transpose(im).convert('RGB')
+    if max_dim is not None and max(image.size) > max_dim:
+        image = ImageOps.contain(image, (max_dim, max_dim))
+    return image, original
 
 
 def detect_qr(img: Image.Image) -> tuple[list[str], bool]:
@@ -453,7 +545,8 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
     except OSError as e:
         return {"path": str(path), "verdict": "error", "score": 0, "reasons": [{"type": "error", "label": f"读取失败 {e}"}], "ocr_text": ""}
 
-    cached = cache.get(str(path), size, mtime)
+    version = result_signature(cfg, enable)
+    cached = cache.get(str(path), size, mtime, version)
     if cached is not None:
         cached["path"] = str(path)
         return cached
@@ -467,7 +560,7 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
     wl = match_rules(path.name, cfg.get("whitelist_rules", []))
     if wl:
         result = {"path": str(path), "verdict": "clean", "score": 0, "reasons": [{"type": "whitelist", "label": "白名单"}], "ocr_text": ""}
-        cache.put(str(path), size, mtime, result["verdict"], 0, result["reasons"], "")
+        cache.put(str(path), size, mtime, result["verdict"], 0, result["reasons"], "", version)
         return result
 
     # 1) 文件名规则（受 enable 开关控制）
@@ -508,12 +601,12 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
             reasons.append({"type": "error", "label": f"解码失败 {e}"})
             verdict, score = "error", 0
 
-        # 近乎纯色 → 不可能有文字/二维码，直接放过（无损跳过全部像素级识别）
+        # 仅完全均匀的像素可以跳过；低方差不能证明不存在小字或二维码。
         if img is not None and verdict == "clean" and is_blank_image(img):
             reasons.append({"type": "blank", "label": "近乎纯色图（跳过识别）"})
             result = {"path": str(path), "verdict": "clean", "score": 0,
                       "reasons": [], "ocr_text": ""}
-            cache.put(str(path), size, mtime, "clean", 0, [], "")
+            cache.put(str(path), size, mtime, "clean", 0, [], "", version)
             return result
 
         if img is not None and verdict == "clean" and enable.get("qr"):
@@ -627,7 +720,7 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
         verdict, score = "suspect", 30
 
     result = {"path": str(path), "verdict": verdict, "score": score, "reasons": reasons, "ocr_text": ocr_text}
-    cache.put(str(path), size, mtime, verdict, score, reasons, ocr_text)
+    cache.put(str(path), size, mtime, verdict, score, reasons, ocr_text, version)
     return result
 
 
@@ -643,7 +736,11 @@ def gather_images(roots: list[str], cfg: dict) -> list[Path]:
         rootp = Path(root)
         if is_quarantined(rootp):
             continue
-        for dirpath, dirnames, filenames in os.walk(rootp):
+        if not rootp.is_dir():
+            raise OSError(f'扫描目录不存在或无法访问：{rootp}')
+        def walk_error(error):
+            raise OSError(f'无法读取扫描目录：{error.filename}：{error}') from error
+        for dirpath, dirnames, filenames in os.walk(rootp, onerror=walk_error):
             dirnames[:] = [d for d in dirnames if not d.startswith(QUARANTINE_NAME)
                           and not is_quarantined(Path(dirpath) / d)]
             for fn in filenames:
@@ -730,7 +827,7 @@ def _scan_worker(roots, cfg, enable, cache, out_q, cancel, pause):
     if not files:
         out_q.put(("done", None))
         return
-    cached = cache.get_batch(infos)
+    cached = cache.get_batch(infos, result_signature(cfg, enable))
     files_to_scan = [p for p, info in zip(files, infos) if str(p) not in cached]
     out_q.put(("cached", len(cached)))  # 通知 UI 缓存命中数
     done = 0
@@ -847,21 +944,154 @@ def _load_manifest(path: Path) -> dict:
     return manifest
 
 
+_QUARANTINE_LOCKS = {}
+_QUARANTINE_LOCKS_GUARD = threading.Lock()
+
+
+def _quarantine_control(root, name):
+    path = Path(root) / name
+    if path.is_symlink():
+        raise ValueError(f'隔离区控制文件不能是符号链接：{name}')
+    return path
+
+
+@contextmanager
+def quarantine_lock(root, timeout=30):
+    """同目录的线程锁 + 系统文件锁；异常退出后系统自动释放。"""
+    root = Path(root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    key = os.path.normcase(str(root))
+    with _QUARANTINE_LOCKS_GUARD:
+        lock = _QUARANTINE_LOCKS.setdefault(key, threading.RLock())
+    with lock, open(_quarantine_control(root, '.ad-filter.lock'), 'a+b') as stream:
+        if stream.tell() == 0:
+            stream.write(b'0')
+            stream.flush()
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                stream.seek(0)
+                if os.name == 'nt':
+                    import msvcrt
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise OSError('该隔离区正被其他窗口使用，请稍后重试')
+                time.sleep(.05)
+        try:
+            yield root
+        finally:
+            stream.seek(0)
+            if os.name == 'nt':
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def _quarantine_serialized(root_index, timeout=30):
+    def decorate(fn):
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            root = args[root_index] if len(args) > root_index else kwargs['quarantine_root']
+            with quarantine_lock(root, timeout):
+                return fn(*args, **kwargs)
+        return wrapped
+    return decorate
+
+
+def _safe_quarantine_item(item, root):
+    root = Path(root).resolve()
+    if not isinstance(item, dict) or not all(isinstance(item.get(k), str) and item[k] for k in ('src', 'dst')):
+        raise ValueError('隔离记录格式无效')
+    entry = dict(item)
+    if not Path(entry['src']).is_absolute():
+        raise ValueError('隔离清单中的原始位置不是完整路径')
+    if 'dst_rel' in entry:
+        if not isinstance(entry['dst_rel'], str) or not entry['dst_rel']:
+            raise ValueError('隔离记录中的相对位置无效')
+        relative = Path(entry['dst_rel'])
+        if relative.is_absolute() or '..' in relative.parts:
+            raise ValueError('隔离清单包含越界路径，已停止操作')
+        dst = (root / relative).resolve()
+    else:
+        dst = Path(entry['dst']).resolve()
+    if dst == root or not dst.is_relative_to(root):
+        raise ValueError('清单引用了当前隔离区以外的文件。旧版清单请在原隔离目录打开。')
+    entry['dst'] = str(dst)
+    entry['dst_rel'] = dst.relative_to(root).as_posix()
+    return entry
+
+
+def _load_quarantine(root):
+    """快照 + 移动前持久化的小日志；复制新清单时按相对位置安全重定位。"""
+    root = Path(root).resolve()
+    path = _quarantine_control(root, 'manifest.json')
+    manifest = _load_manifest(path) if path.exists() else {'items': []}
+    manifest['items'] = [_safe_quarantine_item(item, root) for item in manifest['items']]
+    known = {item['dst'] for item in manifest['items']}
+    journal = _quarantine_control(root, '.ad-filter-journal.jsonl')
+    if journal.exists():
+        lines = journal.read_text(encoding='utf-8').splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            try:
+                record = json.loads(line)
+            except ValueError:
+                if index == len(lines) - 1 and not line.endswith('\n'):
+                    break  # 写入中断；此条意图尚未持久化，文件也尚未移动。
+                raise ValueError('隔离恢复日志损坏，已停止操作以保留文件')
+            if not isinstance(record, dict) or not isinstance(record.get('size'), int) or record['size'] < 0:
+                raise ValueError('隔离恢复日志格式无效')
+            item = _safe_quarantine_item(record.get('item'), root)
+            if item['dst'] in known:
+                continue  # 快照成功、日志清理前中断，幂等重放。
+            src, dst = Path(item['src']), Path(item['dst'])
+            if dst.exists() and not src.exists() and dst.stat().st_size == record['size']:
+                manifest['items'].append(item)
+                known.add(item['dst'])
+            elif src.exists() and not dst.exists():
+                continue  # 意图已保存，但移动尚未开始或已回退。
+            else:
+                raise ValueError(f'发现未完成的隔离移动，请保留并检查这两个位置：{src} / {dst}')
+    return manifest
+
+
+def _save_quarantine(root, manifest):
+    root = Path(root).resolve()
+    manifest['items'] = [_safe_quarantine_item(item, root) for item in manifest['items']]
+    manifest['version'] = 2
+    _write_json_atomic(root / 'manifest.json', manifest)
+    (root / '.ad-filter-journal.jsonl').unlink(missing_ok=True)
+
+
+def _journal_quarantine_move(root, item, size):
+    with open(_quarantine_control(root, '.ad-filter-journal.jsonl'), 'a', encoding='utf-8') as stream:
+        stream.write(json.dumps({'item': item, 'size': size}, ensure_ascii=False) + '\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+@_quarantine_serialized(2)
 def apply_quarantine(items: list[dict], roots: list[str], quarantine_root: Path, log_fn) -> tuple[int, list[str], list[str]]:
     """移动到隔离目录，保留 相对扫描根/相对路径；写恢复清单 manifest.json。返回 (成功数, 错误, 成功路径)"""
-    manifest_path = quarantine_root / "manifest.json"
-    manifest = {"items": []}
-    if manifest_path.exists():
-        try:
-            manifest = _load_manifest(manifest_path)
-        except Exception as e:
-            return 0, [f'隔离清单读取失败：{e}'], []
+    quarantine_root = Path(quarantine_root).resolve()
+    try:
+        manifest = _load_quarantine(quarantine_root)
+        # 先确认快照可写并清理已恢复的日志，失败时不开始移动。
+        _save_quarantine(quarantine_root, manifest)
+    except Exception as e:
+        return 0, [f'隔离清单读取或保存失败：{e}'], []
     errors = []
     moved = 0
     ok_paths: list[str] = []
+    incomplete = False
     root_names = {str(Path(r).resolve()): Path(r).name for r in roots}
     for it in items:
         src = Path(it["path"])
+        dst = None
         try:
             src_res = str(src.resolve())
             root_for = None
@@ -873,25 +1103,28 @@ def apply_quarantine(items: list[dict], roots: list[str], quarantine_root: Path,
             if root_for is None:
                 root_for, rel = "未识别根", src.name
             dst = quarantine_root / root_for / rel
+            if src.resolve().is_relative_to(quarantine_root):
+                raise ValueError('文件已经位于当前隔离区中')
+            _safe_quarantine_item({'src': str(src.resolve()), 'dst': str(dst)}, quarantine_root)
             dst = _unique_destination(dst, '冲突')
             dst.parent.mkdir(parents=True, exist_ok=True)
+            entry = _safe_quarantine_item({'src': str(src.resolve()), 'dst': str(dst),
+                'time': time.strftime('%F %T'), 'reasons': it.get('reasons', [])}, quarantine_root)
+            _journal_quarantine_move(quarantine_root, entry, src.stat().st_size)
             shutil.move(str(src), str(dst))
-            manifest["items"].append({"src": str(src), "dst": str(dst), "time": time.strftime("%F %T"), "reasons": it.get("reasons", [])})
-            try:
-                _write_json_atomic(manifest_path, manifest)
-            except Exception:
-                manifest['items'].pop()
-                rollback = _unique_destination(src, '回退')
-                try:
-                    shutil.move(str(dst), str(rollback))
-                except Exception as rollback_error:
-                    raise RuntimeError(f'保存清单和移回原位置失败，文件保留在 {dst}：{rollback_error}')
-                raise
+            manifest['items'].append(entry)
             moved += 1
             ok_paths.append(str(src))
             log_fn({"action": "quarantine", "src": str(src), "dst": str(dst)})
         except Exception as e:
             errors.append(f"{src}: {e}")
+            if dst is not None and dst.exists() and src.exists():
+                incomplete = True
+    if not incomplete:
+        try:
+            _save_quarantine(quarantine_root, manifest)
+        except OSError as e:
+            errors.append(f'文件已隔离，恢复记录保存在日志中，下次打开会自动恢复：{e}')
     return moved, errors, ok_paths
 
 
@@ -925,10 +1158,10 @@ def apply_delete(items: list[dict], log_fn) -> tuple[int, list[str]]:
 
 def restore_quarantine(quarantine_root: Path, log_fn) -> tuple[int, list[str]]:
     try:
-        manifest = _load_manifest(quarantine_root / 'manifest.json')
+        entries = list_quarantine(quarantine_root)
     except Exception as e:
         return 0, [f'读取清单失败：{e}']
-    return restore_quarantine_items(quarantine_root, [item['dst'] for item in manifest['items']], log_fn)
+    return restore_quarantine_items(quarantine_root, [item['dst'] for item in entries], log_fn)
 
 
 # ---------- 扫描历史 ----------
@@ -953,15 +1186,13 @@ def load_history() -> list[dict]:
 
 
 # ---------- 隔离区条目化管理 ----------
+@_quarantine_serialized(0, timeout=.1)
 def list_quarantine(quarantine_root: Path) -> list[dict]:
     """读 manifest.json，每条附 exists 标记；文件缺失不丢弃（可删记录）。"""
     manifest_path = quarantine_root / "manifest.json"
-    if not manifest_path.exists():
+    if not manifest_path.exists() and not (quarantine_root / '.ad-filter-journal.jsonl').exists():
         return []
-    try:
-        manifest = _load_manifest(manifest_path)
-    except Exception:
-        return []
+    manifest = _load_quarantine(quarantine_root)
     out = []
     for it in manifest.get("items", []):
         out.append({**it, "exists": Path(it.get("dst", "")).exists()})
@@ -971,13 +1202,15 @@ def list_quarantine(quarantine_root: Path) -> list[dict]:
 def _select_manifest(quarantine_root: Path, dsts: list[str]):
     """返回 (manifest_path, 选中条目, 剩余条目)。"""
     manifest_path = quarantine_root / "manifest.json"
-    manifest = _load_manifest(manifest_path)
+    manifest = _load_quarantine(quarantine_root)
+    _save_quarantine(quarantine_root, manifest)
     want = set(dsts)
     picked = [it for it in manifest.get("items", []) if it.get("dst") in want]
     rest = [it for it in manifest.get("items", []) if it.get("dst") not in want]
     return manifest_path, manifest, picked, rest
 
 
+@_quarantine_serialized(0)
 def restore_quarantine_items(quarantine_root: Path, dsts: list[str], log_fn) -> tuple[int, list[str]]:
     """按 dst 精确还原选中条目（manifest 中移除已还原项）。"""
     try:
@@ -1002,12 +1235,13 @@ def restore_quarantine_items(quarantine_root: Path, dsts: list[str], log_fn) -> 
             rest.append(it)
     manifest["items"] = rest
     try:
-        _write_json_atomic(manifest_path, manifest)
+        _save_quarantine(quarantine_root, manifest)
     except OSError as e:
         errors.append(f'文件已还原，但保存清单失败：{e}')
     return restored, errors
 
 
+@_quarantine_serialized(0)
 def delete_quarantine_items(quarantine_root: Path, dsts: list[str], log_fn) -> tuple[int, list[str]]:
     """按 dst 永久删除选中的隔离文件（manifest 中移除记录）。"""
     try:
@@ -1027,7 +1261,7 @@ def delete_quarantine_items(quarantine_root: Path, dsts: list[str], log_fn) -> t
             rest.append(it)
     manifest["items"] = rest
     try:
-        _write_json_atomic(manifest_path, manifest)
+        _save_quarantine(quarantine_root, manifest)
     except OSError as e:
         errors.append(f'文件已删除，但保存清单失败：{e}')
     return deleted, errors
@@ -1093,16 +1327,28 @@ def cluster_similar(paths: list[str], threshold: int = 6, cache: Cache | None = 
     """贪心代表聚类：与已有组代表指纹距离 ≤ 阈值入组，否则自成新组。
     只返回成员 ≥2 的组。贪心代表法不传递合并，避免链式漂移把不相似的串到一起。"""
     groups: list[tuple[int, list[str]]] = []
+    # 汉明距离 <= t 的两个 64 位数，分成 t+1 段后至少一段完全相同。
+    # 只缩小候选范围，仍按原代表创建顺序精确比较，分组语义完全一致。
+    parts = threshold + 1 if 0 <= threshold <= 10 else 0
+    blocks = [(64*i//parts, 64*(i+1)//parts - 64*i//parts) for i in range(parts)]
+    indexes = [{} for _ in blocks]
     for p in paths:
         h = dhash_bits(Path(p), cache)
         if h is None:
             continue
-        for rep, members in groups:
+        candidates = set()
+        for index, (shift, width) in zip(indexes, blocks):
+            candidates.update(index.get((h >> shift) & ((1 << width) - 1), ()))
+        for gi in sorted(candidates) if parts else range(len(groups)):
+            rep, members = groups[gi]
             if (h ^ rep).bit_count() <= threshold:
                 members.append(p)
                 break
         else:
+            gi = len(groups)
             groups.append((h, [p]))
+            for index, (shift, width) in zip(indexes, blocks):
+                index.setdefault((h >> shift) & ((1 << width) - 1), []).append(gi)
     if cache is not None:
         cache.commit()
     return [members for _, members in groups if len(members) >= 2]

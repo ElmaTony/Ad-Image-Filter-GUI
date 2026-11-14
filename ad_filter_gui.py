@@ -114,7 +114,7 @@ class ThumbCache(QObject):
                 continue
             try:
                 from PIL import ImageOps
-                img = af.load_pixel_image(Path(path), self._size)
+                img, _ = af.load_display_image(Path(path), self._size)
                 img = ImageOps.contain(img, (self._size, self._size))
                 rgb = img.convert("RGB")
                 try:
@@ -699,6 +699,51 @@ class TitleBar(QWidget):
 
 
 # ================================================================ CDS 组件
+class DisplayLoader(QObject):
+    """有界后台解码：最多两个在途请求、一个待处理请求，过期结果不进入界面。"""
+    ready = Signal(object)
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.jobs = queue.Queue(maxsize=1)
+        self.generation = 0
+        self.stopped = False
+        for _ in range(2):
+            threading.Thread(target=self._work, daemon=True).start()
+
+    def request(self, path, max_dim):
+        self.generation += 1
+        try:
+            self.jobs.get_nowait()
+        except queue.Empty:
+            pass
+        self.jobs.put_nowait((self.generation, path, max_dim))
+        return self.generation
+
+    def stop(self):
+        self.stopped = True
+        self.generation += 1
+
+    def _work(self):
+        while not self.stopped:
+            try:
+                generation, path, max_dim = self.jobs.get(timeout=.2)
+            except queue.Empty:
+                continue
+            if generation != self.generation or self.stopped:
+                continue
+            try:
+                image, original = af.load_display_image(Path(path), max_dim)
+                result = (generation, path, image.tobytes(), image.width, image.height, original, max_dim is None, '')
+            except Exception as e:
+                result = (generation, path, None, 0, 0, (0, 0), False, str(e))
+            if generation == self.generation and not self.stopped:
+                try:
+                    self.ready.emit(result)
+                except RuntimeError:
+                    return
+
+
 class Lightbox(QWidget):
     """画廊查看器（按 CDS 逆向物理常数）：
     - 暗色 backdrop（rgba(11,11,11,0.94)）
@@ -729,6 +774,10 @@ class Lightbox(QWidget):
         self._press_pos = None
         self._enter = 1.0   # 入场动画进度（showEvent 里从 0 渐到 1）
         self._controls_visible = True
+        self._loader = DisplayLoader(self)
+        self._loader.ready.connect(self._loaded)
+        self._original_size = (0, 0)
+        self._full_loaded = self._full_pending = False
         self._load(path)
         # 底部右侧：图内直接处置按钮（A 标广告 / K 保留）
         self.btn_ad = QPushButton("标记广告 (A)", self)
@@ -783,21 +832,42 @@ class Lightbox(QWidget):
     def _load(self, path):
         self.path = path
         self.setWindowTitle(f'大图查看 · {Path(path).name}')
-        from PIL import Image as _Im, ImageOps as _IO
-        try:
-            with _Im.open(path) as im:
-                img = im.convert("RGB")
-            if max(img.size) > 2400:
-                img = _IO.contain(img, (2400, 2400))
-            rgb = img.convert("RGB")
-            qimg = QImage(rgb.tobytes(), rgb.width, rgb.height, rgb.width * 3,
-                          QImage.Format_RGB888).copy()
-            self._pix = QPixmap.fromImage(qimg)
-        except Exception:
-            self._pix = None
+        self._pix = None
+        self._original_size = (0, 0)
+        self._full_loaded = self._full_pending = False
+        self._load_error = None
+        self._loader.request(path, 2400)
         self.scale = 1.0
         self.tx = self.ty = 0.0
         self.update()
+
+    def _loaded(self, result):
+        generation, path, data, w, h, original, full, error = result
+        if generation != self._loader.generation or path != self.path:
+            return
+        self._full_pending = False
+        if data is not None:
+            self._pix = QPixmap.fromImage(QImage(data, w, h, w*3, QImage.Format_RGB888).copy())
+            self._original_size = original
+            self._full_loaded = full or (w, h) == original
+        elif self._pix is not None:
+            self.app._toast('原始图片加载失败：' + error, ok=False)
+        else:
+            self._load_error = error
+        self._fit()
+        self.update()
+
+    def _ensure_detail(self):
+        if not self._pix or self._full_loaded or self._full_pending:
+            return
+        dpr = self.devicePixelRatioF()
+        if self._fit_w*self.scale*dpr > self._pix.width() or self._fit_h*self.scale*dpr > self._pix.height():
+            self._full_pending = True
+            self._loader.request(self.path, None)
+
+    def closeEvent(self, event):
+        self._loader.stop()
+        super().closeEvent(event)
 
     def _it(self):
         return next((x for x in self.app.items if x["path"] == self.path), None)
@@ -856,7 +926,7 @@ class Lightbox(QWidget):
         p.fillRect(self.rect(), QColor(11, 11, 11, int(240 * min(1.0, self._enter * 1.25))))
         if not self._pix or self._pix.isNull():
             p.setPen(QColor("#a3a3a3"))
-            p.drawText(self.rect(), Qt.AlignCenter, "无法加载图片")
+            p.drawText(self.rect(), Qt.AlignCenter, '无法加载图片' if self._load_error else '正在加载图片…')
             self._draw_chrome(p)
             return
         self._fit()
@@ -939,7 +1009,7 @@ class Lightbox(QWidget):
         self._fit()
         factor = math.exp(max(-6, min(6, -e.angleDelta().y() * self.WHEEL_FACTOR)))
         old = self.scale
-        max_scale = max(2.0, (self._pix.width() / max(1, self._fit_w)))
+        max_scale = max(2.0, self._original_size[0] / max(1, self._fit_w))
         self.scale = max(0.5, min(max_scale * 1.2, self.scale * factor))
         if self.scale < self.SNAP_UNDER:
             self.scale = 1.0
@@ -952,6 +1022,7 @@ class Lightbox(QWidget):
         self.tx = ox - (ox - self.tx) * c
         self.ty = oy - (oy - self.ty) * c
         self._clamp_translate()
+        self._ensure_detail()
         self.update()
 
     def _clamp_translate(self):
@@ -1018,6 +1089,7 @@ class Lightbox(QWidget):
             self.tx = ox - (ox - self.tx) * c
             self.ty = oy - (oy - self.ty) * c
             self._clamp_translate()
+        self._ensure_detail()
         self.update()
 
     def _nav(self, delta):
@@ -1337,8 +1409,6 @@ class StatusDot(QWidget):
 
 # ================================================================ 主窗口
 class App(FramelessWindow):
-    _sig_preview = Signal(object)
-    _sig_preview_err = Signal(object)
 
     def __init__(self, cfg):
         from workbench_ui import configure_fonts
@@ -1375,9 +1445,13 @@ class App(FramelessWindow):
         self.scan_q = queue.Queue()
         self.cancel = threading.Event()
         self.scan_thread = None
+        self._scan_active = False
         self.pause = threading.Event()
         self.total_files = 0
         self._pix = None
+        self._preview_loader = DisplayLoader(self)
+        self._preview_loader.ready.connect(self._preview_loaded)
+        self._review_totals = {v: 0 for v in ('ad', 'suspect', 'error')}
         self._preview_path = None
         self._pending_preview = None
         self._pending_rows: list = []
@@ -1402,8 +1476,6 @@ class App(FramelessWindow):
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(250)
         self._resize_timer.timeout.connect(self._reload_preview_for_size)
-        self._sig_preview.connect(lambda m: self._apply_preview_bytes(*m))
-        self._sig_preview_err.connect(self._on_preview_err)
 
         self._build()
         self._apply_theme()
@@ -2021,7 +2093,7 @@ class App(FramelessWindow):
         return ConfigDialog(self, self.cfg)
 
     def open_config(self):
-        if self._disposing or self._file_busy or (self.scan_thread and self.scan_thread.is_alive()):
+        if self._disposing or self._file_busy or self._scan_running():
             self._toast('请在当前任务完成后修改设置', ok=False)
             return
         d = self.build_config()
@@ -2031,7 +2103,7 @@ class App(FramelessWindow):
         return RuleEditorLite(self, self.cfg)
 
     def open_rule_editor(self):
-        if self._disposing or self._file_busy or (self.scan_thread and self.scan_thread.is_alive()):
+        if self._disposing or self._file_busy or self._scan_running():
             self._toast('请在当前任务完成后修改规则', ok=False)
             return
         self.build_rule_editor().exec()
@@ -2063,6 +2135,7 @@ class App(FramelessWindow):
             e.ignore()
             return
         self.cancel.set()
+        self._preview_loader.stop()
         self.pause.clear()
         try:
             self._timer.stop()
@@ -2118,6 +2191,10 @@ class App(FramelessWindow):
             self.log.append(f"[{datetime.now():%H:%M:%S}] {msg}")
 
     # ---------- 扫描 ----------
+    def _scan_running(self):
+        # 工作线程结束后，仍需处理完本轮队列，再允许新扫描或文件处置。
+        return self._scan_active or bool(self.scan_thread and self.scan_thread.is_alive())
+
     def start_scan(self):
         if self._disposing or self._file_busy:
             self._info('提示', '请等待当前文件操作完成')
@@ -2126,7 +2203,7 @@ class App(FramelessWindow):
         if not roots:
             self._info("提示", "请先在设置里添加要扫描的文件夹")
             return
-        if self.scan_thread and self.scan_thread.is_alive():
+        if self._scan_running():
             self._info("提示", "扫描正在进行中")
             return
         enable = {"filename": self.cfg.get("_enable_filename", True),
@@ -2148,7 +2225,7 @@ class App(FramelessWindow):
             self.cfg["_last_enable"] = dict(enable)
         # 规则/阈值变化（同一会话内改了规则或 OCR 选项）也要即时清缓存
         try:
-            self._cache.check_config_version(self.cfg)
+            self._cache.check_config_version(self.cfg, enable)
         except Exception:
             pass
         af.save_config(self.cfg)
@@ -2160,6 +2237,7 @@ class App(FramelessWindow):
         self.btn_pause.setText("暂停")
         self.thumbs.clear()
         self.items.clear()
+        self._review_totals = {v: 0 for v in ('ad', 'suspect', 'error')}
         self.checked.clear()
         self.model.checked.clear()
         self.model.reset_items([])
@@ -2185,6 +2263,7 @@ class App(FramelessWindow):
             target=af.scan_worker,
             args=(roots, copy.deepcopy(self.cfg), enable, self._cache, self.scan_q, self.cancel, self.pause),
             daemon=True)
+        self._scan_active = True
         self.scan_thread.start()
         self._sync_actions()
         return self
@@ -2223,8 +2302,11 @@ class App(FramelessWindow):
         scan_error = None
         folder_updated = False
         current_hit = False
+        deadline = time.perf_counter() + .012
         try:
-            while True:
+            for _ in range(5000):
+                if time.perf_counter() >= deadline:
+                    break
                 kind, payload = self.scan_q.get_nowait()
                 if kind == "total":
                     self.total_files = payload
@@ -2248,6 +2330,7 @@ class App(FramelessWindow):
                 elif kind == "item":
                     if payload["verdict"] in ("ad", "suspect", "error"):
                         self.items.append(payload)
+                        self._review_totals[payload['verdict']] += 1
                         items_batch.append(payload)
                 elif kind == "progress":
                     latest_progress = payload
@@ -2287,6 +2370,7 @@ class App(FramelessWindow):
             if folder_updated or latest_progress is not None or current_hit:
                 self.folder_bar.update_progress()
             if scan_error is not None:
+                self._scan_active = False
                 self.dot.set_state('ready')
                 self.pause.clear()
                 self._current_file = self._current_root = None
@@ -2295,6 +2379,7 @@ class App(FramelessWindow):
                 self._log(f'扫描失败：{scan_error}')
                 self._info('扫描失败', scan_error)
             elif cancelled:
+                self._scan_active = False
                 self.btn_scan.setEnabled(True)
                 self.btn_pause.setEnabled(False)
                 self.btn_pause.setText("暂停")
@@ -2337,6 +2422,7 @@ class App(FramelessWindow):
                 if errors:
                     self._info("恢复结果", "\n".join(errors[:5]))
             elif done:
+                self._scan_active = False
                 self.btn_scan.setEnabled(True)
                 self.btn_pause.setEnabled(False)
                 self.btn_pause.setText("暂停")
@@ -2458,6 +2544,10 @@ class App(FramelessWindow):
         return sorted(items, key=lambda it: it.get("score", 0), reverse=True)
 
     def refresh(self):
+        self._review_totals = {v: 0 for v in ('ad', 'suspect', 'error')}
+        for item in self.items:
+            if item['verdict'] in self._review_totals:
+                self._review_totals[item['verdict']] += 1
         current = self._current_item()
         previous_row = max(0, self.grid.currentIndex().row())
         current_path = current['path'] if current else None
@@ -2484,7 +2574,7 @@ class App(FramelessWindow):
         # 空状态：仅在「无结果且没在扫描」时出现
         e = getattr(self, "_empty", None)
         if e is not None:
-            scanning = bool(self.scan_thread and self.scan_thread.is_alive())
+            scanning = self._scan_running()
             e.setVisible(len(self.model.items) == 0 and not scanning)
             if self.items:
                 e.title.setText('没有符合筛选条件的图片')
@@ -2522,9 +2612,9 @@ class App(FramelessWindow):
         self.pill_hit.setAlignment(Qt.AlignCenter)
         self.pill_hit.setStyleSheet(
             f"#countPill {{ {CDST.pill_qss(d, 'gray')} }}")
-        picked = [it for it in self.items if it['path'] in self.checked]
+        picked = [it for it in self.items if it['path'] in self.checked] if self.checked else []
         size = sum((self._stat(it['path']) or (0, 0))[0] for it in picked) / 1048576
-        visible = sum(it['path'] in self.checked for it in self.model.items)
+        visible = sum(it['path'] in self.checked for it in self.model.items) if self.checked else 0
         self.pill_sel.setText(f"已选 {n_sel} 张 · {size:.1f} MB")
         self.pill_sel.setFixedHeight(26)
         self.pill_sel.setAlignment(Qt.AlignCenter)
@@ -2536,7 +2626,7 @@ class App(FramelessWindow):
         if hasattr(self, 'selection_scope'):
             hidden = max(0, len(picked) - visible)
             self.selection_scope.setText(f'当前筛选内 {visible} 张' + (f'，隐藏 {hidden} 张' if hidden else ''))
-            totals = {v: sum(it['verdict'] == v for it in self.items) for v in ('ad', 'suspect', 'error')}
+            totals = self._review_totals
             self.review_summary.setText(f"广告 {totals['ad']} · 疑似 {totals['suspect']} · 异常 {totals['error']}")
             mode = self._current_disposal()
             verb = {'quarantine': '隔离', 'recycle': '移入回收站', 'delete': '永久删除'}[mode]
@@ -2554,7 +2644,7 @@ class App(FramelessWindow):
     def _sync_actions(self):
         if not hasattr(self, 'btn_dispose'):
             return
-        scanning = bool(self.scan_thread and self.scan_thread.is_alive())
+        scanning = self._scan_running()
         busy = self._disposing or self._file_busy
         self.btn_scan.setEnabled(not scanning and not busy)
         self.btn_pause.setEnabled(scanning and not self.cancel.is_set())
@@ -2661,26 +2751,18 @@ class App(FramelessWindow):
         tw = max(200, self.preview.width() - 6)
         th = max(120, self.preview.height() - 6)
 
-        def work():
-            try:
-                from PIL import ImageOps
-                img = af.load_pixel_image(Path(path), max(tw, th, 720))
-                img = ImageOps.contain(img, (tw, th))
-                rgb = img.convert("RGB")
-                self._sig_preview.emit((path, rgb.tobytes(), rgb.width, rgb.height))
-            except Exception as e:
-                try:
-                    self._sig_preview_err.emit((path, str(e)))
-                except RuntimeError:
-                    pass
+        self._preview_loader.request(path, max(tw, th, 720))
 
-        threading.Thread(target=work, daemon=True).start()
-
-    def _apply_preview_bytes(self, path, data, w, h):
-        if path != self._preview_path:
+    def _preview_loaded(self, result):
+        generation, path, data, w, h, _, _, error = result
+        if generation != self._preview_loader.generation or path != self._preview_path:
             return
-        qimg = QImage(data, w, h, w * 3, QImage.Format_RGB888).copy()
-        self._pix = QPixmap.fromImage(qimg)
+        if data is None:
+            self._on_preview_err((path, error))
+            return
+        image = QImage(data, w, h, w*3, QImage.Format_RGB888).copy()
+        self._pix = QPixmap.fromImage(image).scaled(max(200, self.preview.width()-6),
+            max(120, self.preview.height()-6), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.preview.setPixmap(self._pix)
 
     def _on_preview_err(self, msg):
@@ -2847,7 +2929,7 @@ class App(FramelessWindow):
         if not checked_items:
             self._info("提示", "请先勾选要处置的图片（点卡片左上圆圈或按空格）")
             return
-        if self.scan_thread and self.scan_thread.is_alive():
+        if self._scan_running():
             self._info("提示", "扫描正在进行，请等扫描结束或先取消再处置\n（处置会让正在分析的文件消失，结果不可信）")
             return
         mode = self._current_disposal()
@@ -2916,7 +2998,7 @@ class App(FramelessWindow):
 
     def undo_disposal(self):
         """撤销上一次隔离处置：按 manifest 把该批文件移回原位置。"""
-        if not self._undo_batch or self._disposing or self._file_busy or (self.scan_thread and self.scan_thread.is_alive()):
+        if not self._undo_batch or self._disposing or self._file_busy or self._scan_running():
             return self
         q_root_str, srcs = self._undo_batch
         if not self._ask("撤销处置", f"将把上次隔离的 {len(srcs)} 张图移回原位置\n继续？"):
@@ -2943,7 +3025,7 @@ class App(FramelessWindow):
 
     def restore_ui(self):
         """隔离区管理：查看 / 还原选中 / 彻底删除 / 全部还原。"""
-        if self._disposing or self._file_busy or (self.scan_thread and self.scan_thread.is_alive()):
+        if self._disposing or self._file_busy or self._scan_running():
             return self
         q_root = self._quarantine_root()
         self._qdlg = QuarantineDialog(self, q_root)
@@ -3229,26 +3311,7 @@ class ConfigDialog(WorkbenchDialog):
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             if not isinstance(data, dict) or "ocr_keywords" not in data:
                 raise ValueError("不是有效的广告图过滤配置（缺少 ocr_keywords）")
-            merged = copy.deepcopy(af.DEFAULT_CONFIG)
-            for key, value in data.items():
-                if key in ('filename_rules', 'ocr_keywords', 'whitelist_rules'):
-                    if not isinstance(value, list):
-                        raise ValueError(f'{key} 须为规则列表')
-                    for rule in value:
-                        if not isinstance(rule, dict) or not isinstance(rule.get('pattern'), str):
-                            raise ValueError(f'{key} 中存在无效规则')
-                        re.compile(rule['pattern'])
-                        if key == 'ocr_keywords':
-                            weight = float(rule.get('weight', 1))
-                            if not 1 <= weight <= 10000:
-                                raise ValueError('规则权重须在 1–10000 范围内')
-                    merged[key] = value
-                elif isinstance(merged.get(key), dict):
-                    if not isinstance(value, dict):
-                        raise ValueError(f'{key} 须为配置对象')
-                    merged[key].update(value)
-                elif not key.startswith('_last_'):
-                    merged[key] = value
+            merged = af.normalize_config({k: v for k, v in data.items() if not k.startswith('_last_')})
             if not 1 <= int(merged['workers']) <= 16:
                 raise ValueError('线程须在 1–16 范围内')
             if not 0 <= int(merged['phash']['threshold']) <= 64:
@@ -3263,6 +3326,7 @@ class ConfigDialog(WorkbenchDialog):
             old = str(self.app._quarantine_root())
             merged['quarantine_locations'] = list(dict.fromkeys(
                 self.cfg.get('quarantine_locations', []) + locations + [old]))
+            af.save_config(merged)
         except Exception as e:
             InfoBar.error(title="导入失败", content=str(e),
                           orient=Qt.Horizontal, isClosable=True,
@@ -3271,7 +3335,6 @@ class ConfigDialog(WorkbenchDialog):
         # 原地更新（app.cfg 引用不变）并立即落盘；界面控件重开对话框即可见新值
         self.cfg.clear()
         self.cfg.update(merged)
-        af.save_config(self.cfg)
         self._reload_controls()
         InfoBar.success(title="已导入", content="配置和当前设置控件已同步更新",
                         orient=Qt.Horizontal, isClosable=True,
@@ -3696,7 +3759,11 @@ class QuarantineDialog(WorkbenchDialog):
         self.btn_ra.setEnabled(bool(self.table.rowCount()) and not busy)
 
     def reload(self):
-        self.entries = af.list_quarantine(self.q_root)
+        try:
+            self.entries = af.list_quarantine(self.q_root)
+        except (OSError, ValueError, KeyError) as error:
+            self.entries = []
+            self.app._info('无法读取隔离区', str(error))
         t = self.table
         t.setRowCount(len(self.entries))
         for r, e in enumerate(self.entries):

@@ -6,6 +6,9 @@ bench_cache.db
 ad_filter_log.jsonl
 ad_filter_history.json
 ad_filter_config.json
+.ad-filter.lock
+.ad-filter-journal.jsonl
+_广告隔离*/
 *.db-journal
 
 # ---- 构建产物 ----
