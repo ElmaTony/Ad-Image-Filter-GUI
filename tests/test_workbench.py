@@ -388,6 +388,174 @@ class WorkbenchTests(unittest.TestCase):
         for dialog in dialogs:
             dialog.deleteLater()
 
+    def test_visible_categories_sync_with_compatible_filter_and_global_counts(self):
+        for index, label, expected in ((0, '全部待审', 4), (1, '广告', 2), (2, '疑似', 1), (3, '异常', 1)):
+            button = self.app.verdict_tabs.buttons[index]
+            button.click()
+            self.assertEqual(self.app.f_verdict.currentIndex(), index)
+            self.assertEqual(self.app.f_verdict.currentText(), label)
+            self.assertTrue(button.isChecked())
+            self.assertEqual(button.text(), f'{label} {expected}')
+            self.assertEqual(self.app.results_scope.text(), f'显示 {expected} / 待审 4')
+        self.app.f_verdict.setCurrentIndex(1)
+        self.assertTrue(self.app.verdict_tabs.buttons[1].isChecked())
+        self.assertEqual(self.app.pill_hit.text(), '待审 4')
+        self.assertEqual(self.app.verdict_tabs.buttons[3].text(), '异常 1')
+
+    def test_view_all_checked_then_restore_original_filters(self):
+        selected = {self.rows[0]['path'], self.rows[2]['path']}
+        self.app.checked.update(selected)
+        self.app.f_verdict.setCurrentIndex(2)
+        self.app.f_sort.setCurrentIndex(4)
+        self.app.f_search.setText('Image')
+        self.app.refresh()
+        self.assertIn('隐藏 2', self.app.selection_scope.text())
+        self.app.btn_selected.click()
+        self.assertTrue(self.app._selected_only)
+        self.assertEqual({it['path'] for it in self.app.model.items}, selected)
+        self.assertEqual(self.app.checked, selected)
+        self.assertEqual(self.app.btn_selected.text(), '返回筛选')
+        self.app.btn_selected.click()
+        self.assertEqual(self.app.f_verdict.currentIndex(), 2)
+        self.assertEqual(self.app.f_search.text(), 'Image')
+        self.assertEqual(self.app.f_sort.currentIndex(), 4)
+        self.assertEqual(self.app.checked, selected)
+        self.assertEqual([it['path'] for it in self.app.model.items], [self.rows[1]['path']])
+
+    def test_uncheck_inside_selected_view_removes_only_that_item(self):
+        self.app.checked.update((self.rows[0]['path'], self.rows[2]['path']))
+        self.app.set_selected_only(True)
+        self.app.toggle_check(0)
+        self.assertEqual(self.app.checked, {self.rows[2]['path']})
+        self.assertEqual([it['path'] for it in self.app.model.items], [self.rows[2]['path']])
+        self.app.clear_sel()
+        self.assertFalse(self.app.model.items)
+        self.assertEqual(self.app._empty.title.text(), '当前没有已选图片')
+        self.assertTrue(self.app.btn_selected.isVisible())
+        self.app.clear_filters()
+        self.assertEqual(len(self.app.model.items), 4)
+        self.assertFalse(self.app.checked)
+
+    def test_reset_empty_filters_preserves_selection_and_sort(self):
+        self.app.toggle_check(0)
+        self.app.f_verdict.setCurrentIndex(3)
+        self.app.f_search.setText('does-not-exist')
+        self.app.f_sort.setCurrentIndex(1)
+        self.app.refresh()
+        self.assertEqual(self.app.results_scope.text(), '显示 0 / 待审 4')
+        self.assertTrue(self.app.btn_reset_filters.isEnabled())
+        self.app.btn_reset_filters.click()
+        self.assertEqual(self.app.f_verdict.currentIndex(), 0)
+        self.assertEqual(self.app.f_search.text(), '')
+        self.assertEqual(self.app.f_sort.currentIndex(), 1)
+        self.assertEqual(self.app.checked, {self.rows[0]['path']})
+        self.assertEqual(len(self.app.model.items), 4)
+
+    def test_keyboard_selection_is_limited_to_visible_category(self):
+        from PySide6.QtTest import QTest
+        self.app.toggle_check(0)
+        self.app.verdict_tabs.buttons[3].click()
+        self.app.grid.setFocus()
+        QTest.keyClick(self.app.grid, Qt.Key_A, Qt.ControlModifier)
+        self.assertEqual(self.app.checked, {self.rows[0]['path'], self.rows[2]['path']})
+        self.assertEqual(self.app.btn_all.text(), '取消全选')
+        QTest.keyClick(self.app.grid, Qt.Key_A, Qt.ControlModifier)
+        self.assertEqual(self.app.checked, {self.rows[0]['path']})
+        QTest.keyClick(self.app.grid, Qt.Key_Space)
+        self.assertIn(self.rows[2]['path'], self.app.checked)
+
+    def test_folder_overflow_lists_all_paths_progress_and_safe_removal(self):
+        roots = [str(self.root / f'来源相册_{i}') for i in range(12)]
+        self.app.add_folders(roots)
+        self.app.resize(1080, 680)
+        self.pump(.1)
+        bar = self.app.folder_bar
+        self.assertEqual(len(bar._chips), 12)
+        self.assertLessEqual(sum(chip.isVisible() for chip in bar._chips.values()), 3)
+        self.assertTrue(bar.btn_more.isVisible())
+        dialog = bar.build_more()
+        self.assertEqual(dialog.table.rowCount(), 12)
+        self.app._folder_totals[roots[0]] = 5
+        self.app._folder_done[roots[0]] = 5
+        dialog.refresh_sources()
+        self.assertEqual(dialog.table.item(0, 0).text(), roots[0])
+        self.assertEqual(dialog.table.item(0, 1).text(), '✓ 5/5')
+        self.app._scan_active = True
+        dialog.refresh_sources()
+        self.assertFalse(dialog.remove_buttons[0].isEnabled())
+        self.app.remove_folder(roots[0])
+        self.assertEqual(len(self.app.get_roots()), 12)
+        self.app._scan_active = False
+        dialog.refresh_sources()
+        dialog.remove_buttons[0].click()
+        self.assertEqual(len(self.app.get_roots()), 11)
+        self.assertEqual(dialog.table.rowCount(), 11)
+        dialog.close()
+        dialog.deleteLater()
+
+    def test_partial_quarantine_keeps_failed_item_selected(self):
+        missing = Path(self.rows[1]['path'])
+        missing.unlink()
+        self.app._roots = [str(self.root)]
+        self.app.checked.update((self.rows[0]['path'], str(missing)))
+        errors = []
+        self.app._info = lambda title, content: errors.append(content)
+        self.app.execute_disposal()
+        self.assertTrue(self.pump(until=lambda: not self.app._disposing))
+        self.assertEqual(self.app.checked, {str(missing)})
+        self.assertTrue(any(item['path'] == str(missing) for item in self.app.items))
+        self.assertFalse(any(item['path'] == self.rows[0]['path'] for item in self.app.items))
+        self.assertIn('1 张失败', self.app.status.text())
+        self.assertTrue(errors)
+
+    def test_streaming_errors_have_their_own_category_and_reason(self):
+        self.app.items = []
+        self.app.refresh()
+        self.app.scan_q.put(('item', {**self.rows[2], 'reasons': [{'type': 'error', 'label': '解码失败 示例'}]}))
+        self.app._poll_queue()
+        self.assertEqual(self.app.verdict_tabs.buttons[3].text(), '异常 1')
+        self.assertEqual(self.app.verdict_tabs.buttons[2].text(), '疑似 0')
+        self.assertGreaterEqual(self.app.f_reason.findText('解码失败'), 0)
+        self.app.verdict_tabs.buttons[3].click()
+        self.app._flush_preview()
+        self.assertIn('解码失败 示例', self.app.info.toPlainText())
+
+    def test_empty_scan_cancel_and_failure_states_are_distinct(self):
+        self.app.items = []
+        self.app.total_files = 0
+        self.app.scan_q.put(('done', None))
+        self.app._poll_queue()
+        self.assertEqual(self.app._empty.title.text(), '本次扫描没有待审图片')
+        self.app.scan_q.put(('cancelled', None))
+        self.app._poll_queue()
+        self.assertEqual(self.app._empty.title.text(), '扫描已取消')
+        self.app.scan_q.put(('scan_error', '目录不可访问'))
+        self.app._poll_queue()
+        self.assertEqual(self.app._empty.title.text(), '扫描未完成')
+
+    def test_available_logical_screen_and_compact_actions_fit(self):
+        from PySide6.QtCore import QRect
+        from types import SimpleNamespace
+        screen = SimpleNamespace(availableGeometry=lambda: QRect(0, 0, 960, 540))
+        with patch.object(gui.App, 'screen', return_value=screen):
+            compact = gui.App(copy.deepcopy(self.app.cfg))
+        compact._quarantine_override = self.root / 'compact-quarantine'
+        compact._toast = compact._info = lambda *a, **k: None
+        try:
+            compact.show()
+            self.pump(.2)
+            self.assertLessEqual(compact.width(), 960)
+            self.assertLessEqual(compact.height(), 540)
+            self.assertTrue(compact.btn_more_actions.isVisible())
+            for name in ('top_bar', 'bot', 'footer', 'btn_dispose', 'btn_mark', 'btn_keep', 'btn_big'):
+                widget = getattr(compact, name)
+                p = widget.mapTo(compact, widget.rect().bottomRight())
+                self.assertLess(p.x(), compact.width(), name)
+                self.assertLess(p.y(), compact.height(), name)
+        finally:
+            compact.close()
+            self.qt.processEvents()
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -432,6 +432,7 @@ class FolderChip(QWidget):
         lay.setContentsMargins(9, 2, 4, 2)
         lay.setSpacing(2)
         self.lbl = QLabel(name, self)
+        self.lbl.setMaximumWidth(160)
         lay.addWidget(self.lbl)
         self.btn_x = QToolButton(self)
         self.btn_x.setText("✕")
@@ -449,6 +450,7 @@ class FolderChip(QWidget):
         return self.lbl.text()
 
     def set_state(self, text, done, active):
+        text = QFontMetrics(self.lbl.font()).elidedText(text, Qt.ElideMiddle, 160)
         if self.lbl.text() != text:
             self.lbl.setText(text)
         if self.property("done") != done or self.property("active") != active:
@@ -484,6 +486,7 @@ class FolderBar(QWidget):
         self._scroll.setFrameShape(QFrame.NoFrame)
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet('QScrollArea { background: transparent; border: none; }')
         self._scroll.viewport().setStyleSheet('background: transparent;')
@@ -494,6 +497,11 @@ class FolderBar(QWidget):
         self._box.setSpacing(6)
         self._scroll.setWidget(self._chip_host)
         lay.addWidget(self._scroll, 1)
+        self.btn_more = PushButton('更多文件夹', self)
+        self.btn_more.setFixedSize(92, 32)
+        self.btn_more.clicked.connect(self.open_more)
+        self.btn_more.hide()
+        lay.addWidget(self.btn_more)
         self.wave = WaveDots(self)
         self.wave.hide()
         self.lbl_current = QLabel("", self)
@@ -506,7 +514,7 @@ class FolderBar(QWidget):
         self.progress.setFixedWidth(90)
         lay.addWidget(self.progress)
         self.lbl_pct = CaptionLabel("", self)
-        self.lbl_pct.setFixedWidth(52)
+        self.lbl_pct.setFixedWidth(88)
         lay.addWidget(self.lbl_pct)
 
     def rebuild(self):
@@ -529,6 +537,103 @@ class FolderBar(QWidget):
             hint.setObjectName("folderHint")
             self._box.addWidget(hint)
         self.update_progress()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'btn_more'):
+            self._fit_chips()
+
+    def _fit_chips(self):
+        chips = list(self._chips.values())
+        budget = self._scroll.width() + (100 if self.btn_more.isVisible() else 0)
+        widths = [chip.sizeHint().width() + 6 for chip in chips]
+        overflow = len(chips) > 3 or sum(widths) > budget
+        available = max(0, budget - (100 if overflow else 0))
+        used, shown = 0, 0
+        for chip, width in zip(chips, widths):
+            visible = shown < 3 and (used + width <= available or shown == 0)
+            chip.setVisible(visible)
+            if visible:
+                shown += 1
+                used += width
+        hidden = len(chips) - shown
+        self.btn_more.setText(f'更多 {hidden}')
+        self.btn_more.setVisible(hidden > 0)
+        self.btn_more.setToolTip(f'查看全部 {len(chips)} 个文件夹的路径与扫描进度')
+
+    def build_more(self):
+        from PySide6.QtWidgets import QHeaderView, QTableWidgetItem
+        dialog = WorkbenchDialog(self.app)
+        dialog.setFixedWidth(860)
+        dialog.viewLayout.addWidget(SubtitleLabel('扫描文件夹', dialog))
+        dialog.viewLayout.addWidget(CaptionLabel('查看全部来源、扫描进度，或打开和移除文件夹。', dialog))
+        table = TableWidget(dialog)
+        table.setColumnCount(3)
+        table.setHorizontalHeaderLabels(['完整路径', '扫描进度', '操作'])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        table.setColumnWidth(1, 110)
+        table.setColumnWidth(2, 140)
+        table.verticalHeader().hide()
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setMinimumHeight(240)
+        dialog.table = table
+        dialog._paths = None
+        dialog.remove_buttons = []
+
+        def refresh():
+            paths = self.app.get_roots()
+            if paths != dialog._paths:
+                dialog._paths = list(paths)
+                table.setRowCount(len(paths))
+                dialog.remove_buttons = []
+                for row, path in enumerate(paths):
+                    item = QTableWidgetItem(path)
+                    item.setToolTip(path)
+                    table.setItem(row, 0, item)
+                    table.setItem(row, 1, QTableWidgetItem('待扫描'))
+                    actions = QWidget(table)
+                    layout = QHBoxLayout(actions)
+                    layout.setContentsMargins(0, 0, 0, 0)
+                    for text, callback in (
+                        ('打开', lambda _, p=path: QDesktopServices.openUrl(QUrl.fromLocalFile(p))),
+                        ('移除', lambda _, p=path: (self.app.remove_folder(p), refresh())),
+                    ):
+                        button = PushButton(text, actions)
+                        button.setFixedHeight(28)
+                        button.clicked.connect(callback)
+                        layout.addWidget(button)
+                        if text == '移除':
+                            dialog.remove_buttons.append(button)
+                    table.setCellWidget(row, 2, actions)
+                    table.setRowHeight(row, 36)
+            busy = self.app._scan_running() or self.app._disposing or self.app._file_busy
+            for row, (path, button) in enumerate(zip(paths, dialog.remove_buttons)):
+                key = str(Path(path)).rstrip('\\/')
+                total = self.app._folder_totals.get(key)
+                count = self.app._folder_done.get(key, 0)
+                table.item(row, 1).setText('待扫描' if total is None else
+                    (f'✓ {total}/{total}' if count >= total else f'{count}/{total}'))
+                button.setEnabled(not busy)
+        dialog.viewLayout.addWidget(table)
+        dialog.yesButton.hide()
+        dialog.cancelButton.setText('关闭')
+        from workbench_ui import style_dialog
+        style_dialog(dialog)
+        dialog.refresh_sources = refresh
+        timer = QTimer(dialog)
+        timer.setInterval(200)
+        timer.timeout.connect(refresh)
+        dialog.finished.connect(timer.stop)
+        timer.start()
+        refresh()
+        return dialog
+
+    def open_more(self):
+        dialog = self.build_more()
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
     def _chip_menu(self, path, chip, pos):
         menu = QMenu(self)
@@ -564,7 +669,7 @@ class FolderBar(QWidget):
         for key, chip in self._chips.items():
             total = totals.get(key)
             d = done.get(key, 0)
-            name = Path(key).name
+            name = Path(key).name or key
             if total is None:
                 text, is_done = name, False
             elif d >= total:
@@ -577,7 +682,7 @@ class FolderBar(QWidget):
             chip.set_state(text, is_done, is_active)
         # 总进度（扫描中才显示，完成后整组隐藏——100% 常驻是视觉噪音）
         total_all = self.app.total_files
-        scanning = self.app.scan_thread is not None and self.app.scan_thread.is_alive()
+        scanning = self.app._scan_running()
         show_prog = bool(scanning and total_all > 0 and any_total)
         self.progress.setVisible(show_prog)
         self.lbl_pct.setVisible(show_prog)
@@ -585,10 +690,11 @@ class FolderBar(QWidget):
             d_all = sum(done.get(k, 0) for k in totals)
             # 未归属根的也在跑：用引擎广播的进度更准（见 _poll_queue）
             self.progress.setValue(int(getattr(self.app, "_last_progress", 0) * 100 / max(1, total_all)))
-            self.lbl_pct.setText(f"{int(self.progress.value())}%")
+            self.lbl_pct.setText(f'{self.app._last_progress}/{total_all}')
         elif not any_total:
             self.progress.setValue(0)
             self.lbl_pct.setText("")
+        self._fit_chips()
 
 
 # ================================================================ 标题栏（Windows 风格）
@@ -1424,7 +1530,8 @@ class App(FramelessWindow):
         scr = self.screen().availableGeometry() if self.screen() else None
         self.resize(min(1500, scr.width() - 80) if scr else 1460,
                     min(940, scr.height() - 100) if scr else 920)
-        self.setMinimumSize(1080, 680)
+        self.setMinimumSize(min(1080, max(820, scr.width()-32)) if scr else 1080,
+                            min(680, max(460, scr.height()-32)) if scr else 680)
         if scr is not None:
             # 窗口居中（默认 pop 位置可能出现在屏幕右下，遮挡正在用的内容）
             self.move(scr.x() + (scr.width() - self.width()) // 2,
@@ -1435,6 +1542,11 @@ class App(FramelessWindow):
 
         self.items: list = []
         self.checked: set = set()
+        self._selected_only = False
+        self._filters_before_selected = None
+        self._scan_outcome = None
+        self._had_review_hits = False
+        self._reason_keys = set()
         self.similar_groups: list = []
         self._sim_map: dict = {}
         self._disposing = False
@@ -1493,6 +1605,7 @@ class App(FramelessWindow):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_queue)
         self._timer.start(120)
+        self.refresh()
 
     # ---------- 主题 ----------
     def _apply_theme(self):
@@ -1758,7 +1871,8 @@ class App(FramelessWindow):
                   self.btn_big, self.btn_log, self.btn_undo, self.btn_pause,
                   self.btn_rules, self.btn_cfg, self.btn_history, self.btn_export,
                   self.btn_theme, self.btn_palette, self.btn_prev, self.btn_next,
-                  self.btn_all, self.btn_invert, self.btn_clear, self.btn_similar):
+                  self.btn_all, self.btn_invert, self.btn_clear, self.btn_similar,
+                  self.btn_more_actions, self.btn_reset_filters, self.btn_selected):
             setCustomStyleSheet(w, trans, trans)
         mk = outline(dang_fg, dang_fill, dang_edge)
         kp = outline(ok_fg, ok_fill, ok_edge)
@@ -1779,6 +1893,10 @@ class App(FramelessWindow):
         txt2 = CDST.c(d, TT.text_2)
         txt3 = CDST.c(d, TT.text_3)
         surf2 = CDST.c(d, TT.surface2)
+        surface = CDST.c(d, TT.surface0)
+        self.detail_scroll.setStyleSheet(f'QScrollArea#detailScroll {{ background:{surface}; border:none; }}')
+        self.detail_scroll.viewport().setStyleSheet(f'background:{surface};')
+        self.detail_scroll.widget().setStyleSheet(f'QWidget#detailBody {{ background:{surface}; }}')
         for w in self.findChildren(QFrame, "vsep"):
             w.setStyleSheet(f"background: {bdr};")
         for name in ("lbl_disposal",):
@@ -1893,8 +2011,14 @@ class App(FramelessWindow):
         else:
             self.model.checked.add(p)
         self.checked = self.model.checked
-        self.grid.viewport().update()
-        self._update_count_label()
+        self._selection_updated()
+
+    def _selection_updated(self):
+        if self._selected_only:
+            self.refresh()
+        else:
+            self.grid.viewport().update()
+            self._update_count_label()
 
     def _on_multi_select(self, *_args):
         """多选（Ctrl/Shift/框选）≥2 张时自动勾选——批量处置的主要入口。"""
@@ -1990,15 +2114,13 @@ class App(FramelessWindow):
                 self.model.checked.add(it["path"])
             self._log(f"已全选 {len(items)} 张")
         self.checked = self.model.checked
-        self.grid.viewport().update()
-        self._update_count_label()
+        self._selection_updated()
         return self
 
     def clear_sel(self):
         self.model.checked.clear()
         self.checked = self.model.checked
-        self.grid.viewport().update()
-        self._update_count_label()
+        self._selection_updated()
         return self
 
     def invert_sel(self):
@@ -2010,17 +2132,20 @@ class App(FramelessWindow):
             else:
                 self.model.checked.add(p)
         self.checked = self.model.checked
-        self.grid.viewport().update()
-        self._update_count_label()
+        self._selection_updated()
         return self
 
     def remove_folder(self, path=None):
         """移除一个导入文件夹（chip 右键 / 配置弹窗）。"""
         if path is None:
             return self
+        if self._scan_running() or self._disposing or self._file_busy:
+            self._toast('当前任务完成后才能移除扫描文件夹', ok=False)
+            return self
         self._roots = [r for r in self._roots if str(r) != str(path)]
         af.save_config(self.cfg)
         self.folder_bar.rebuild()
+        self.refresh()
         self._toast(f"已移除文件夹：{Path(path).name}")
         return self
 
@@ -2034,8 +2159,7 @@ class App(FramelessWindow):
                 self.model.checked.add(p)
                 n += 1
         self.checked = self.model.checked
-        self.grid.viewport().update()
-        self._update_count_label()
+        self._selection_updated()
         self.set_status(f"已勾选 {n} 张相似图（{len(self.similar_groups)} 组）")
         return self
 
@@ -2088,6 +2212,14 @@ class App(FramelessWindow):
         from cds_widgets import CDSCommandPalette
         self._palette = CDSCommandPalette.popup(self, cmds)
         return self
+
+    def open_workbench_menu(self):
+        menu = QMenu(self)
+        for button in (self.btn_history, self.btn_restore, self.btn_palette, self.btn_theme):
+            action = menu.addAction(button.text())
+            action.setEnabled(button.isEnabled())
+            action.triggered.connect(lambda _=False, b=button: b.click())
+        menu.exec(self.btn_more_actions.mapToGlobal(self.btn_more_actions.rect().bottomLeft()))
 
     def build_config(self):
         return ConfigDialog(self, self.cfg)
@@ -2163,6 +2295,9 @@ class App(FramelessWindow):
             self.add_folders([d])
 
     def add_folders(self, dirs):
+        if self._scan_running() or self._disposing or self._file_busy:
+            self._toast('当前任务完成后才能添加扫描文件夹', ok=False)
+            return self
         before = len(self._roots)
         self._roots = list(dict.fromkeys(self._roots + [str(d) for d in dirs]))
         added = len(self._roots) - before
@@ -2171,6 +2306,7 @@ class App(FramelessWindow):
             self._toast(f"已添加 {added} 个文件夹（共 {len(self._roots)} 个）")
         if hasattr(self, "folder_bar"):
             self.folder_bar.rebuild()
+            self.refresh()
         return self
 
     def get_roots(self):
@@ -2237,6 +2373,13 @@ class App(FramelessWindow):
         self.btn_pause.setText("暂停")
         self.thumbs.clear()
         self.items.clear()
+        self._selected_only = False
+        self._filters_before_selected = None
+        self._scan_outcome = None
+        self._had_review_hits = False
+        self._reason_keys = set()
+        self._set_filter_controls(self.f_verdict.currentIndex(), search=self.f_search.text())
+        self._update_reason_choices(set())
         self._review_totals = {v: 0 for v in ('ad', 'suspect', 'error')}
         self.checked.clear()
         self.model.checked.clear()
@@ -2265,6 +2408,7 @@ class App(FramelessWindow):
             daemon=True)
         self._scan_active = True
         self.scan_thread.start()
+        self.refresh()
         self._sync_actions()
         return self
 
@@ -2329,6 +2473,7 @@ class App(FramelessWindow):
                     folder_updated = True
                 elif kind == "item":
                     if payload["verdict"] in ("ad", "suspect", "error"):
+                        self._had_review_hits = True
                         self.items.append(payload)
                         self._review_totals[payload['verdict']] += 1
                         items_batch.append(payload)
@@ -2358,6 +2503,13 @@ class App(FramelessWindow):
         try:
             if items_batch:
                 self._pending_rows.extend(items_batch)
+                keys = {self._reason_key(reason.get('label', '')) for item in items_batch for reason in item['reasons']}
+                keys.discard('')
+                if not keys <= self._reason_keys:
+                    self._reason_keys.update(keys)
+                    if self._update_reason_choices(self._reason_keys):
+                        self._pending_rows.clear()
+                        self.refresh()
             self._flush_rows()
             if latest_progress is not None:
                 self._last_progress = latest_progress
@@ -2371,6 +2523,7 @@ class App(FramelessWindow):
                 self.folder_bar.update_progress()
             if scan_error is not None:
                 self._scan_active = False
+                self._scan_outcome = 'failed'
                 self.dot.set_state('ready')
                 self.pause.clear()
                 self._current_file = self._current_root = None
@@ -2378,13 +2531,19 @@ class App(FramelessWindow):
                 self.set_status('扫描失败，请查看提示后重试')
                 self._log(f'扫描失败：{scan_error}')
                 self._info('扫描失败', scan_error)
+                self._pending_rows.clear()
+                self.refresh()
             elif cancelled:
                 self._scan_active = False
+                self._scan_outcome = 'cancelled'
                 self.btn_scan.setEnabled(True)
                 self.btn_pause.setEnabled(False)
                 self.btn_pause.setText("暂停")
                 self.dot.set_state("ready")
                 self.set_status("已取消")
+                self._pending_rows.clear()
+                self.refresh()
+                self._reload_reason_filter()
             elif disposed is not None:
                 mode, moved, errors, ok_paths = disposed[0], disposed[1], disposed[2], disposed[3]
                 q_root_str = disposed[4] if len(disposed) > 4 else None
@@ -2423,6 +2582,7 @@ class App(FramelessWindow):
                     self._info("恢复结果", "\n".join(errors[:5]))
             elif done:
                 self._scan_active = False
+                self._scan_outcome = 'complete'
                 self.btn_scan.setEnabled(True)
                 self.btn_pause.setEnabled(False)
                 self.btn_pause.setText("暂停")
@@ -2499,11 +2659,47 @@ class App(FramelessWindow):
             self._update_count_label()
 
     # ---------- 筛选 ----------
+    def _set_filter_controls(self, verdict=0, reason='全部原因', search=''):
+        self._search_timer.stop()
+        for control in (self.f_verdict, self.f_reason, self.f_search):
+            control.blockSignals(True)
+        try:
+            self.f_verdict.setCurrentIndex(verdict)
+            self.f_reason.setCurrentIndex(max(0, self.f_reason.findText(reason)))
+            self.f_search.setText(search)
+            self.f_search.clearButton.setVisible(bool(search) and self.f_search.hasFocus())
+        finally:
+            for control in (self.f_verdict, self.f_reason, self.f_search):
+                control.blockSignals(False)
+
+    def clear_filters(self):
+        """只清除筛选，不清除任何勾选或改变排序。"""
+        self._selected_only = False
+        self._filters_before_selected = None
+        self._set_filter_controls()
+        self.refresh()
+
+    def set_selected_only(self, enabled):
+        enabled = bool(enabled)
+        if enabled == self._selected_only:
+            return
+        if enabled:
+            self._filters_before_selected = (self.f_verdict.currentIndex(), self.f_reason.currentText(),
+                                             self.f_search.text())
+            self._set_filter_controls()
+        elif self._filters_before_selected is not None:
+            self._set_filter_controls(*self._filters_before_selected)
+            self._filters_before_selected = None
+        self._selected_only = enabled
+        self.refresh()
+
     def _filter_params(self):
         return (self.f_verdict.currentText(), self.f_reason.currentText(),
                 self.f_search.text().strip())
 
     def _passes_filter(self, it, fp=None):
+        if self._selected_only and it['path'] not in self.checked:
+            return False
         if fp is None:
             fp = self._filter_params()
         v, r, q = fp
@@ -2577,31 +2773,45 @@ class App(FramelessWindow):
             scanning = self._scan_running()
             e.setVisible(len(self.model.items) == 0 and not scanning)
             if self.items:
-                e.title.setText('没有符合筛选条件的图片')
+                e.title.setText('当前没有已选图片' if self._selected_only and not self.checked else '没有符合筛选条件的图片')
                 e.desc.setText('调整判定、命中原因或路径搜索。\n隐藏的已选图片仍保留在待处置集合中。')
-            elif self.total_files:
-                e.title.setText('本次审查已完成' if self._last_progress else '没有待审结果')
+            elif self._scan_outcome == 'complete':
+                e.title.setText('本次审查已完成' if self._had_review_hits else '本次扫描没有待审图片')
                 e.desc.setText(f'本次扫描 {self.total_files} 张图片。可重新扫描或添加其他文件夹。')
+            elif self._scan_outcome == 'cancelled':
+                e.title.setText('扫描已取消')
+                e.desc.setText(f'已处理 {self._last_progress}/{self.total_files} 张，已产生的待审结果和勾选予以保留。')
+            elif self._scan_outcome == 'failed':
+                e.title.setText('扫描未完成')
+                e.desc.setText('检查扫描目录和错误提示后重试；已产生的结果仍可审查。')
+            elif self.get_roots():
+                e.title.setText(f'已添加 {len(self.get_roots())} 个文件夹')
+                e.desc.setText('点击“开始扫描”，广告、疑似和异常图片会显示在这里。')
             else:
                 e.title.setText('开始一次图片审查')
                 e.desc.setText('添加本地文件夹，或把文件夹拖入窗口。\n所有识别均在本机完成。')
             e.setGeometry(self.grid.geometry())
+        self._sync_actions()
 
     def _reload_reason_filter(self):
-        labels = set()
-        for it in self.items:
-            for h in it["reasons"]:
-                lab = h.get("label", "")
-                key = (lab.split("]")[0] + "]") if lab.startswith("OCR") else lab.split(" ")[0]
-                if key:
-                    labels.add(key)
-        items = ["全部原因"] + sorted(labels)
+        self._reason_keys = {self._reason_key(reason.get('label', '')) for item in self.items for reason in item['reasons']}
+        self._reason_keys.discard('')
+        if self._update_reason_choices(self._reason_keys):
+            self.refresh()
+
+    @staticmethod
+    def _reason_key(label):
+        return (label.split(']')[0] + ']') if label.startswith('OCR') else label.split(' ')[0]
+
+    def _update_reason_choices(self, labels):
+        items = ['全部原因'] + sorted(labels)
         cur = self.f_reason.currentText()
         self.f_reason.blockSignals(True)
         self.f_reason.clear()
         self.f_reason.addItems(items)
         self.f_reason.setCurrentIndex(items.index(cur) if cur in items else 0)
         self.f_reason.blockSignals(False)
+        return self.f_reason.currentText() != cur
 
     def _update_count_label(self):
         """全局勾选与当前筛选分别计数，处置始终作用于全局勾选。"""
@@ -2622,12 +2832,31 @@ class App(FramelessWindow):
         self.pill_sel.setStyleSheet(
             f"#countPill {{ {CDST.pill_qss(d, role)} }}")
         self.pill_sel.setVisible(True)
-        self.lbl_count.setToolTip(f"待审 {n_hit} · 已选 {n_sel} · 当前筛选内 {visible}")
+        self.lbl_count.setToolTip(f"全部待审 {len(self.items)} · 当前显示 {n_hit} · 全局已选 {n_sel} · 可见已选 {visible}")
         if hasattr(self, 'selection_scope'):
             hidden = max(0, len(picked) - visible)
-            self.selection_scope.setText(f'当前筛选内 {visible} 张' + (f'，隐藏 {hidden} 张' if hidden else ''))
+            self.selection_scope.setText(f'当前筛选内已选 {visible} 张' + (f'，隐藏 {hidden} 张' if hidden else ''))
             totals = self._review_totals
             self.review_summary.setText(f"广告 {totals['ad']} · 疑似 {totals['suspect']} · 异常 {totals['error']}")
+            self.verdict_tabs.update_counts((len(self.items), totals['ad'], totals['suspect'], totals['error']))
+            self.results_scope.setText(f'显示 {n_hit} / 待审 {len(self.items)}')
+            self.results_scope.setToolTip('显示为当前筛选内图片数；待审包括广告、疑似、异常，不含正常图片')
+            self.pill_hit.setText(f'待审 {len(self.items)}')
+            self.selection_scope.setStyleSheet('color:' + CDST.sem(d, 'warn' if hidden else 'gray')[0])
+            self.btn_selected.setVisible(bool(n_sel) or self._selected_only)
+            self.btn_selected.setChecked(self._selected_only)
+            self.btn_selected.setText('返回筛选' if self._selected_only else '查看已选')
+            self.btn_selected.setToolTip('查看全部勾选图片，再次点击返回原筛选；勾选不会被清除')
+            filtered = self._selected_only or self.f_verdict.currentIndex() != 0 or self.f_reason.currentIndex() != 0 or bool(self.f_search.text())
+            self.btn_reset_filters.setEnabled(filtered)
+            self.btn_all.setText('取消全选' if n_hit and visible == n_hit else '全选')
+            self.btn_all.setEnabled(bool(n_hit))
+            self.btn_all.setToolTip('仅切换当前筛选内的图片，保留筛选外勾选；Ctrl+A')
+            self.btn_invert.setEnabled(bool(n_hit))
+            self.btn_clear.setEnabled(bool(n_sel))
+            self.btn_clear.setToolTip('清除全部勾选，包括被筛选隐藏的图片')
+            self.btn_similar.setToolTip('勾选全部相似组，包含当前筛选外的组成员')
+            self.btn_export.setEnabled(bool(n_hit))
             mode = self._current_disposal()
             verb = {'quarantine': '隔离', 'recycle': '移入回收站', 'delete': '永久删除'}[mode]
             self.btn_dispose.setText(f'{verb} {len(picked)} 张')
@@ -2658,6 +2887,9 @@ class App(FramelessWindow):
         for name in ('btn_cfg', 'btn_rules', 'btn_add'):
             getattr(self, name).setEnabled(not scanning and not busy)
         self.folder_bar._scroll.setEnabled(not scanning and not busy)
+        current = self._current_item()
+        for name in ('btn_mark', 'btn_keep', 'btn_big', 'btn_prev', 'btn_next'):
+            getattr(self, name).setEnabled(current is not None and not busy)
 
     def _quarantine_root(self):
         if self._quarantine_override is not None:
@@ -2839,7 +3071,7 @@ class App(FramelessWindow):
             self.detail.layout().setSpacing(6 if compact else 10)
             self.preview.setMinimumHeight(80 if compact else 130)
             self.info.setMinimumHeight(70 if compact else 100)
-            self.detail_path.setVisible(not compact)
+            self.detail_path.setVisible(True)
             self.lbl_disposal.setVisible(self.width() >= 1200)
             self.status.setMaximumWidth(max(240, self.width() - 560))
 

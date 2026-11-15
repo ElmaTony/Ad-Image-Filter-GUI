@@ -9,6 +9,9 @@
 ![暖陶工作台浅色界面](docs/screenshots/workbench-light.png)
 
 - “全部待审”包含广告、疑似、异常，三类可以独立筛选。
+- 分类入口直接显示各类数量；“显示 N / 待审 M”区分当前筛选与全部待审。清除筛选保留勾选与排序。
+- 筛选外的已选数量持续提示；“查看已选”可核对全部勾选，再次点击恢复原筛选。全选和反选只作用于当前显示，清除选择作用于全部勾选。
+- 文件夹过多时通过“更多”查看完整路径、逐项进度和打开/移除操作；窄窗口提供更多菜单和两行处置栏，详情内容可滚动，单图动作保持可见。
 - 底栏显示全局已选数量、大小和筛选外隐藏数量；三个可见处置选项对应明确的执行按钮文案。
 - “标记广告”表示加入待处置；“本次保留”仅移出本次结果，不写白名单。
 - 设置支持相似距离阈值，导入配置后同步全部控件；详情保留完整已保存的 OCR 文本。
@@ -113,11 +116,11 @@ python ad_filter.py --gui-test      # GUI 功能自测（131 项断言）
 |---|---|---|
 | 引擎自测 | `python ad_filter.py --selftest` | 无需 GUI，合成 fixture |
 | GUI 功能自测 | `python ad_filter.py --gui-test` | 131 项断言 |
-| 工作台回归 | `python tests/test_workbench.py` | 18 个用例，包含大图边缘、纯净查看、缓存刷新和错误恢复 |
+| 工作台回归 | `python tests/test_workbench.py` | 28 个用例，包含工作台分类、跨筛选选择、文件夹溢出、窄屏、快捷键和文件操作 |
 | 引擎回归 | `python tests/test_scan_engine.py` | 11 个用例，包含调度、取消、OCR 复用及隔离/恢复 |
 | 审查修复回归 | `python tests/test_review_fixes.py` | 17 个用例，包含双进程隔离、恢复日志、稀疏文字、缓存、配置和原图加载 |
 | 新旧版对照 | `python tests/benchmark_scan.py` | 与 Git 基线逐字段比较结果并计时，使用临时缓存 |
-| UI 元素审查 | `python tests/audit_ui.py` | 72 项几何/颜色断言，深浅主题与三个窗口尺寸 |
+| UI 元素审查 | `python tests/audit_ui.py` | 100 项几何/颜色断言，深浅主题与三个窗口尺寸 |
 | 端到端 | `python tests/test_e2e.py` | 37 项完整操作链 |
 | 精度 | `python tests/test_accuracy.py` | 6 类广告 + 6 类干扰负样本，共 44 张合成图片 |
 

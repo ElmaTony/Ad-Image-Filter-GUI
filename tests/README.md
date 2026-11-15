@@ -6,11 +6,11 @@
 |---|---|---|---|
 | 引擎自测 | `python ad_filter.py --selftest`（项目根） | 引擎全流程回归 | ✅ 合成 fixture |
 | GUI 功能自测 | `python ad_filter.py --gui-test`（项目根） | 131 项 | ✅ 合成 fixture，临时隔离区 |
-| 工作台回归 | `python tests/test_workbench.py` | 18 用例 | ✅ 临时图片与配置 |
+| 工作台回归 | `python tests/test_workbench.py` | 28 用例 | ✅ 临时图片与配置 |
 | 引擎回归 | `python tests/test_scan_engine.py` | 11 用例 | ✅ 临时文件与隔离目录 |
 | 审查修复回归 | `python tests/test_review_fixes.py` | 17 用例 | ✅ 临时数据，含双进程和真实 OCR |
 | 新旧对照 | `python tests/benchmark_scan.py` | 逐字段比对并计时 | ✅ 12 张合成图片，可附加本机只读样本 |
-| UI 元素审查 | `python tests/audit_ui.py` | 72 项 | ✅ 深浅主题、三个尺寸、合成图片 |
+| UI 元素审查 | `python tests/audit_ui.py` | 100 项 | ✅ 深浅主题、三个尺寸、合成图片 |
 | 端到端 | `python tests/test_e2e.py` | 37 项 | ⚠️ 需要本地真实样本 |
 | 精度压力测试 | `python tests/test_accuracy.py` | 22 正样本、22 负样本 | ✅ 全部自动生成 |
 
@@ -32,6 +32,7 @@
 - **audit_ui.py**：标题栏按钮几何、顶栏/筛选条高度、网格单元尺寸、无侧栏断言、底部停靠完整性、像素级语义色（执行处置=红、品牌橙在场）
 - **preview_layouts.py**：用临时合成数据输出大图横/竖图及纯净查看截图到 `_preview/`；`--interactive` 可用于原生窗口检查。
 - **preview_dialogs.py**：使用独立合成历史、图片和隔离清单输出深浅主题弹窗截图到 `_preview/dialogs/`。
+- **preview_workbench.py --output <目录>**：使用临时合成图片和独立配置、缓存、历史、日志、隔离区，输出首次启动、混合分类、隐藏已选、全部已选、筛选空结果、异常、日志、多文件夹和窄屏的 Qt 截图；输出位置由调用者指定。
 
 2026-10-30 弹窗更新：新增命令面板的 Esc、重复按钮、Ctrl+K、方向键与 Enter 检查；设置路径验证、导入与恢复默认；自定义隔离位置的真实移动、扫描排除和旧隔离区恢复；弹窗导航、历史搜索和固定操作栏检查。工作台回归在默认与 200% 缩放下运行，历史与配置均隔离在临时目录。
 

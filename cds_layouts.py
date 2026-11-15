@@ -38,6 +38,7 @@ class LayoutManager:
         app.detail.setMinimumWidth(320)
         app.detail.setMaximumWidth(520)
         self._dock_bottom(True)
+        self.on_resize()
         self.refresh_theme(getattr(app, "theme", "dark") == "dark")
 
     def _teardown(self):
@@ -71,7 +72,8 @@ class LayoutManager:
         bot.show()
 
     def on_resize(self):
-        pass
+        from workbench_ui import adapt_workbench
+        adapt_workbench(self.app)
 
     def refresh_theme(self, dark: bool):
         # 侧栏已删：主题重绘由 App._apply_theme 统一驱动各面板

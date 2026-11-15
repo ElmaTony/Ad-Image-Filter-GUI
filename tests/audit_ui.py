@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""UI 元素审查：位置 / 大小 / 颜色逐项断言（深浅主题 × 三布局）。
+"""UI 元素审查：位置 / 大小 / 颜色逐项断言（深浅主题、多尺寸审查工作台）。
 
 背景：用户截图暴露过「药丸方盒」「胶囊裁切」「图标隐形」三类问题，
 纯看截图容易漏，几何+像素断言更可靠。全部通过 = 每个元素在合理的位置/大小/颜色。
@@ -163,8 +163,17 @@ def audit(app, theme, mode, check, shot, pump):
     # —— 筛选条 ——
     fb = app.filter_bar
     check(f"[{tag}] 筛选条分行高 144", fb.height() == 144, f"h={fb.height()}")
-    for w in (app.f_verdict, app.f_reason, app.f_search, app.f_sort):
+    for w in (app.verdict_tabs, app.f_reason, app.f_search, app.f_sort):
         check(f"[{tag}] 筛选控件高30或32 ({w.__class__.__name__})", w.height() in (30, 32), f"h={w.height()}")
+    for label, button in zip(('全部待审', '广告', '疑似', '异常'), app.verdict_tabs.buttons):
+        check(f'[{tag}] {label}分类可见且带数量', button.isVisible() and button.text().startswith(label+' '))
+        p = button.mapTo(app.filter_bar, button.rect().bottomRight())
+        check(f'[{tag}] {label}分类无裁切', p.x() < app.filter_bar.width() and p.y() < app.filter_bar.height())
+    check(f'[{tag}] 显示和待审范围独立可见', app.results_scope.isVisible() and '/ 待审 ' in app.results_scope.text())
+    for name in ('btn_prev', 'btn_next', 'btn_mark', 'btn_keep', 'btn_big'):
+        button = getattr(app, name)
+        p = button.mapTo(app.detail, button.rect().bottomRight())
+        check(f'[{tag}] {name}固定动作在详情内', p.x() < app.detail.width() and p.y() < app.detail.height())
     check(f"[{tag}] 计数区在处置条内", app.lbl_count.mapTo(bot := app.bot, app.lbl_count.rect().topRight()).x() <= bot.width())
 
     # —— 网格卡片 ——
