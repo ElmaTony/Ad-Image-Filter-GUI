@@ -41,6 +41,9 @@ from functools import wraps
 import unicodedata
 from pathlib import Path
 
+# 单文件打包时，资源位于模块旁的解包目录，用户数据则仍在 EXE 旁。
+APP_VERSION = Path(__file__).with_name('VERSION').read_text(encoding='utf-8').strip()
+
 if getattr(sys, "frozen", False):
     # PyInstaller 打包后 __file__ 指向临时解压目录，配置/缓存要放 exe 旁边
     APP_DIR = Path(sys.executable).resolve().parent

@@ -63,7 +63,7 @@ def adapt_workbench(app):
     if not hasattr(app, 'disposal_controls'):
         return
     compact = app.width() < 1180
-    for name in ('btn_history', 'btn_restore', 'btn_palette', 'btn_theme'):
+    for name in ('btn_history', 'btn_restore', 'btn_palette', 'btn_theme', 'btn_about'):
         getattr(app, name).setVisible(not compact)
     app.btn_more_actions.setVisible(compact)
     narrow = app.width() < 1040
@@ -142,6 +142,7 @@ def build_workbench(app):
     tl.addStretch(1)
     tl.addWidget(button('btn_palette', '命令', app.open_palette, top, FIF.SEARCH))
     tl.addWidget(button('btn_theme', '主题', app.toggle_theme, top, FIF.BRIGHTNESS))
+    tl.addWidget(button('btn_about', '关于', app.open_about, top, FIF.INFO))
     tl.addWidget(button('btn_more_actions', '更多', app.open_workbench_menu, top, FIF.MORE))
     root.addWidget(top)
 

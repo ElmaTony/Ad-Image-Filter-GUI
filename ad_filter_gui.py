@@ -20,7 +20,7 @@ from pathlib import Path
 
 import ad_filter as af
 import cds_tokens as CDST
-from dialog_ui import WorkbenchDialog, NoticeDialog
+from dialog_ui import AboutDialog, WorkbenchDialog, NoticeDialog
 from cds_tokens import T as CDSTT       # 主题类属性（surface / text / border / 判定色 …）
 
 from PySide6.QtCore import (QAbstractListModel, Property, QEvent, QModelIndex, QObject, QRect, QSize,
@@ -1872,7 +1872,7 @@ class App(FramelessWindow):
                   self.btn_rules, self.btn_cfg, self.btn_history, self.btn_export,
                   self.btn_theme, self.btn_palette, self.btn_prev, self.btn_next,
                   self.btn_all, self.btn_invert, self.btn_clear, self.btn_similar,
-                  self.btn_more_actions, self.btn_reset_filters, self.btn_selected):
+                  self.btn_about, self.btn_more_actions, self.btn_reset_filters, self.btn_selected):
             setCustomStyleSheet(w, trans, trans)
         mk = outline(dang_fg, dang_fill, dang_edge)
         kp = outline(ok_fg, ok_fill, ok_edge)
@@ -2170,6 +2170,13 @@ class App(FramelessWindow):
     def _info(self, title, content):
         NoticeDialog(self, title, content, confirmation=False).exec()
 
+    def open_about(self):
+        dialog = AboutDialog(self, af.APP_VERSION)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
+
     def _toast(self, content, ok=True):
         """CDS Toast：右下角 3000ms 自消失（claudecodeui 规范）。
 
@@ -2208,6 +2215,7 @@ class App(FramelessWindow):
             ("隔离区管理…", self.restore_ui),
             ("导出 CSV 报告", self.export_report),
             ("切换浅色 / 深色", self.toggle_theme),
+            ("关于广告图过滤", self.open_about),
         ]
         from cds_widgets import CDSCommandPalette
         self._palette = CDSCommandPalette.popup(self, cmds)
@@ -2215,7 +2223,7 @@ class App(FramelessWindow):
 
     def open_workbench_menu(self):
         menu = QMenu(self)
-        for button in (self.btn_history, self.btn_restore, self.btn_palette, self.btn_theme):
+        for button in (self.btn_history, self.btn_restore, self.btn_palette, self.btn_theme, self.btn_about):
             action = menu.addAction(button.text())
             action.setEnabled(button.isEnabled())
             action.triggered.connect(lambda _=False, b=button: b.click())
@@ -4085,6 +4093,7 @@ def app_icon_pixmap(size: int = 64) -> "QPixmap":
 
 def run_gui(return_app=False):
     qapp = QApplication.instance() or QApplication(sys.argv)
+    qapp.setApplicationVersion(af.APP_VERSION)
     setThemeColor("#c6613f")   # CDS 官方主品牌色（陶土橙深阶）
     qapp.setWindowIcon(QIcon(app_icon_pixmap(256)))   # 任务栏/系统显示的窗口图标
     cfg = af.load_config()
@@ -4151,6 +4160,20 @@ def gui_func_test() -> int:
         return False
 
     try:
+        # 从主窗口打开实际弹窗，校验打包资源读取及可见文案。
+        about_text = []
+
+        def inspect_about():
+            dialog = qapp.activeModalWidget()
+            if isinstance(dialog, AboutDialog):
+                if dialog.version_label.isVisible():
+                    about_text.append(dialog.version_label.text())
+                dialog.reject()
+
+        QTimer.singleShot(0, inspect_about)
+        app.btn_about.click()
+        check('关于显示软件版本', about_text == [f'版本 v{qapp.applicationVersion()}'])
+
         # —— 启动时不记忆上次扫描的文件夹 ——
         check("启动时文件夹列表为空", len(app.get_roots()) == 0,
               f"roots={app.get_roots()}")

@@ -177,6 +177,27 @@ def style_dialog(dialog):
     dialog.resize(width, height)
 
 
+class AboutDialog(WorkbenchDialog):
+    def __init__(self, parent, version):
+        super().__init__(parent)
+        self.setFixedWidth(400)
+        self.preferred_height = 230
+        self.header_description = False
+        self.viewLayout.addWidget(QLabel('关于广告图过滤', self))
+        self.version_label = QLabel(f'版本 v{version}', self)
+        self.version_label.setObjectName('sectionTitle')
+        self.version_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.viewLayout.addWidget(self.version_label)
+        description = QLabel('在本机扫描、识别和审查图片。', self)
+        description.setObjectName('mutedText')
+        description.setWordWrap(True)
+        self.viewLayout.addWidget(description)
+        self.viewLayout.addStretch()
+        self.yesButton.hide()
+        self.cancelButton.setText('关闭')
+        style_dialog(self)
+
+
 class NoticeDialog(WorkbenchDialog):
     def __init__(self, parent, title, content, confirmation=True):
         super().__init__(parent)

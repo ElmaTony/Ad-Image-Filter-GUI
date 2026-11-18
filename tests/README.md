@@ -5,7 +5,7 @@
 | 层级 | 命令 | 断言数 | 能否开箱即跑 |
 |---|---|---|---|
 | 引擎自测 | `python ad_filter.py --selftest`（项目根） | 引擎全流程回归 | ✅ 合成 fixture |
-| GUI 功能自测 | `python ad_filter.py --gui-test`（项目根） | 131 项 | ✅ 合成 fixture，临时隔离区 |
+| GUI 功能自测 | `python ad_filter.py --gui-test`（项目根） | 132 项 | ✅ 合成 fixture，临时隔离区 |
 | 工作台回归 | `python tests/test_workbench.py` | 28 用例 | ✅ 临时图片与配置 |
 | 引擎回归 | `python tests/test_scan_engine.py` | 11 用例 | ✅ 临时文件与隔离目录 |
 | 审查修复回归 | `python tests/test_review_fixes.py` | 17 用例 | ✅ 临时数据，含双进程和真实 OCR |
@@ -20,6 +20,8 @@
 2026-11-18 二维码回归涵盖 EAN-13、带定位图案的方格及条纹、带徽标模糊码、普通文本码、旋转的损坏码、多码命中理由和旧缓存失效。未解码候选需通过定位图案、双轴时序和两份格式信息校验。解码接口参考 [pyzbar 的符号限制](https://github.com/NaturalHistoryMuseum/pyzbar/blob/master/pyzbar/pyzbar.py) 和 [OpenCV 的解码返回值](https://docs.opencv.org/4.4.0/de/dc3/classcv_1_1QRCodeDetector.html)。本轮二维码回归 7 项、引擎与审查修复回归 28 项、工作台 28 项、GUI 自测 131 项及 E2E 37 项均通过。原有精度集 22 个正样本全部命中，22 个负样本无误报。基线 `8f4d833` 的 12 张合成图和 7 张本地只读图片逐字段对照一致。另用独立临时工作台验证方格图不会进入待审，损坏码显示新提示。
 
 暂停自测在测试内给快速解码留出操作时间，并依据扫描完成状态判断继续后是否结束。最终 EXE 的 `--selftest`、`--gui-test` 和 `--smoke` 均退出 0。用户配置、缓存、操作日志和扫描历史与交付检查前一致。
+
+`v1.3.2` 的 GUI 自测新增「关于显示软件版本」。从宽窗口工具栏和窄窗口「更多」分别打开「关于」，均显示 `v1.3.2`。GUI 自测 132 项与工作台回归 28 项通过。Windows 单文件 EXE 的 `--selftest`、`--gui-test`、`--smoke` 均退出 0。核对了包内 `VERSION` 及 Windows 文件版本、产品版本和四段数字资源。发布前拒绝了旧 EXE、错误版本标签和错误版本标题，测试过程未写入用户配置、缓存、历史和日志。
 
 ## 需要真实样本的用例
 

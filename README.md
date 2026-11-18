@@ -82,7 +82,7 @@ python ad_filter.py                 # 启动 GUI
 python ad_filter.py --selftest      # 引擎自测（无界面）
 python ad_filter.py --make-fixtures # 生成合成测试样本到 testdata/
 python ad_filter.py --bench         # 性能基准
-python ad_filter.py --gui-test      # GUI 功能自测（131 项断言）
+python ad_filter.py --gui-test      # GUI 功能自测（132 项断言）
 ```
 
 使用流程：添加文件夹（或拖入）→ 开始扫描 → 逐张确认或批量勾选 → 选处置方式 → 执行处置。需要回滚时用「撤销处置」或「恢复隔离区」。
@@ -115,7 +115,7 @@ python ad_filter.py --gui-test      # GUI 功能自测（131 项断言）
 | 层级 | 命令 | 说明 |
 |---|---|---|
 | 引擎自测 | `python ad_filter.py --selftest` | 无需 GUI，合成 fixture |
-| GUI 功能自测 | `python ad_filter.py --gui-test` | 131 项断言 |
+| GUI 功能自测 | `python ad_filter.py --gui-test` | 132 项断言 |
 | 工作台回归 | `python tests/test_workbench.py` | 28 个用例，包含工作台分类、跨筛选选择、文件夹溢出、窄屏、快捷键和文件操作 |
 | 引擎回归 | `python tests/test_scan_engine.py` | 11 个用例，包含调度、取消、OCR 复用及隔离/恢复 |
 | 审查修复回归 | `python tests/test_review_fixes.py` | 17 个用例，包含双进程隔离、恢复日志、稀疏文字、缓存、配置和原图加载 |
@@ -135,7 +135,8 @@ workbench_ui.py       # 暖陶工作台视图和配套窗口主题
 cds_tokens.py         # 设计令牌（色彩/尺寸/语义色体系）
 cds_widgets.py        # 通用组件（Toast/命令面板/骨架屏等）
 cds_layouts.py        # 主区布局管理（无侧栏，单形态）
-build-exe.txt         # 打包脚本（自动复制到根目录并清理 dist/build/spec）
+VERSION               # 软件与发行版的版本号
+build-exe.txt         # Windows 打包入口说明
 scripts/              # 可复用的打包、清理和 GitHub Release 发布脚本
 tests/                # 测试套件（见上表）
 assets/               # 主题图标资源
@@ -153,7 +154,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 
 产物为根目录 `广告图过滤.exe`。构建成功后自动清理 `dist/`、`build/`、`.spec` 和源码字节码缓存，保留用户数据与依赖环境。单文件首次运行会先解压依赖。
 
-每次更新必须测试、打包、清理、推送源码并上传 GitHub Release，约定见 `AGENTS.md`。提交源码后，执行 `scripts/publish.ps1 -Tag <版本> -Title <标题> -NotesFile RELEASE_NOTES.md`；脚本复用 Git 凭据或 `GH_TOKEN`，将 EXE 上传到发行草稿，核对附件后再公开发布。
+主窗口「关于」显示软件版本，窄窗口可从「更多」打开。右键 EXE 选择「属性 → 详细信息」可查看文件版本和产品版本。
+
+发布前递增根目录 `VERSION`，例如 `1.3.2`，然后测试、打包、清理和提交。执行 `scripts/publish.ps1 -Title <本次改进> -NotesFile <发行说明文件>`，脚本核对 EXE 版本，自动生成 `v1.3.2` 标签并为标题加上版本号。脚本复用 Git 凭据或 `GH_TOKEN` 推送源码并上传到发行草稿，核对附件后再公开。完整约定见 `AGENTS.md`。
 
 ## 隐私声明
 
