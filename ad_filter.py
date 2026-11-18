@@ -194,7 +194,7 @@ def result_signature(cfg, enable=None):
                     qr=enable.get('qr', False), ocr=enable.get('ocr', False)) if enable is not None else dict(
         filename=cfg.get('_enable_filename', True), shape=cfg.get('_enable_shape', True),
         qr=cfg['qr']['enabled'], ocr=cfg['ocr']['enabled'])
-    blob = dict(config={k: cfg.get(k) for k in keys}, enable=switches, revision=2)
+    blob = dict(config={k: cfg.get(k) for k in keys}, enable=switches, revision=3 if switches['qr'] else 2)
     return hashlib.sha256(json.dumps(blob, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
 
 
@@ -465,24 +465,79 @@ def load_display_image(path: Path, max_dim=None):
     return image, original
 
 
-def detect_qr(img: Image.Image) -> tuple[list[str], bool]:
-    """返回 (成功解码的内容列表, 是否检测到二维码图形)。
-    OpenCV QRCodeDetector 只作**图形检测**——它对带 logo/低清/截图变形的真实二维码
-    经常 seen=True 但 decoded 为空（用户反馈"明显二维码却疑似"的根因）。
-    真正解码交给 pyzbar（见 decode_qr_texts）。"""
+def _qr_format_word(value: int) -> int:
+    """QR 格式信息的 5 位内容、10 位 BCH 校验及固定掩码。"""
+    remainder = value << 10
+    for shift in range(4, -1, -1):
+        if remainder & (1 << (shift + 10)):
+            remainder ^= 0x537 << shift
+    return ((value << 10) | remainder) ^ 0x5412
+
+
+_QR_FORMAT_WORDS = tuple(_qr_format_word(value) for value in range(32))
+
+
+def _has_qr_structure(gray, corners) -> bool:
+    """无法解码时，核对定位图案、双轴时序及两份格式信息。"""
     import cv2
     import numpy as np
 
-    arr = cv2.cvtColor(np.asarray(img), cv2.COLOR_RGB2BGR)
-    det = cv2.QRCodeDetector()
-    try:
-        ok, decoded, _points, _straight = det.detectAndDecodeMulti(arr)
-    except cv2.error:
-        return [], False
-    if not ok:
-        return [], False
-    texts = [d for d in (decoded or []) if d]
-    return texts, True
+    quad = np.asarray(corners, dtype=np.float32).reshape(4, 2)
+    if not np.isfinite(quad).all() or not cv2.isContourConvex(quad):
+        return False
+    min_edge = np.linalg.norm(quad - np.roll(quad, 1, axis=0), axis=1).min()
+    if min_edge < 21:
+        return False
+    side = 354  # QR 最多 177×177 个模块，每个模块至少两点用于采样。
+    target = np.float32([(0, 0), (side-1, 0), (side-1, side-1), (0, side-1)])
+    warp = cv2.warpPerspective(gray, cv2.getPerspectiveTransform(quad, target), (side, side))
+    _, binary = cv2.threshold(warp, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    # 8×8 模板包含 7×7 定位图案以及内侧的浅色分隔边。
+    finder = np.zeros((8, 8), dtype=bool)
+    finder[:7, :7] = True
+    finder[1:6, 1:6] = False
+    finder[2:5, 2:5] = True
+    for size in range(21, min(177, int(min_edge)) + 1, 4):
+        centers = ((np.arange(size) + .5) * side / size).astype(int)
+        grid = binary[np.ix_(centers, centers)] == 0
+        probes = (grid[:8, :8], grid[:8, -8:][:, ::-1], grid[-8:, :8][::-1])
+        if any(np.count_nonzero(probe != finder) > 6 for probe in probes):
+            continue
+        timing = np.arange(8, size - 8) % 2 == 0
+        if ((grid[6, 8:-8] == timing).mean() < .8 or (grid[8:-8, 6] == timing).mean() < .8):
+            continue
+        for modules in (grid, grid.T):  # 镜像图的格式信息沿对角线翻转。
+            first = [*modules[:6, 8], modules[7, 8], modules[8, 8], modules[8, 7], *modules[8, :6][::-1]]
+            second = [*modules[8, -8:][::-1], *modules[-7:, 8]]
+            a, b = (sum(int(bit) << i for i, bit in enumerate(bits)) for bits in (first, second))
+            if any((a ^ word).bit_count() <= 2 and (b ^ word).bit_count() <= 2 for word in _QR_FORMAT_WORDS):
+                return True
+    return False
+
+
+def detect_qr(img: Image.Image, *, retry_image: Image.Image | None = None) -> tuple[list[str], bool]:
+    """返回已解码的内容及可信二维码证据，候选轮廓本身不计入。"""
+    import cv2
+    import numpy as np
+
+    verified = False
+    detector = cv2.QRCodeDetector()
+    for image in (img, retry_image):
+        if image is None:
+            break
+        gray = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2GRAY)
+        try:
+            _, decoded, points, _ = detector.detectAndDecodeMulti(gray)
+        except (cv2.error, UnicodeDecodeError):
+            break
+        texts = [text for text in decoded if text.strip()]
+        if texts:
+            return texts, True
+        if points is None or not len(points):
+            break
+        # 缩图识别出的候选可能在更大图上成功解码。保留两种尺寸的结构证据。
+        verified = verified or any(_has_qr_structure(gray, corners) for corners in points)
+    return [], verified
 
 
 def decode_qr_texts(img: Image.Image) -> list[str]:
@@ -490,11 +545,11 @@ def decode_qr_texts(img: Image.Image) -> list[str]:
     也能解出 t.me 链接，且仅 10~20ms/张，不比 OpenCV 慢。
     pyzbar 未安装或解码失败时返回 []（调用方回退 OpenCV 行为）。"""
     try:
-        from pyzbar.pyzbar import decode as _zb_decode
+        from pyzbar.pyzbar import ZBarSymbol, decode as _zb_decode
     except Exception:
         return []
     try:
-        res = _zb_decode(img)
+        res = _zb_decode(img, symbols=[ZBarSymbol.QRCODE])
     except Exception:
         return []
     out = []
@@ -506,6 +561,11 @@ def decode_qr_texts(img: Image.Image) -> list[str]:
         if t:
             out.append(t)
     return out
+
+
+def _qr_link(texts):
+    """返回实际命中的内容，保留现有链接和 Telegram 引流信号。"""
+    return next((text for text in texts if re.search(r't\.me|http|telegram', normalize_text(text))), None)
 
 
 # ---------------------------------------------------------------- 逐图分析
@@ -611,32 +671,21 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
 
         if img is not None and verdict == "clean" and enable.get("qr"):
             try:
-                # 主通道：pyzbar 解码（实测 OpenCV 解不出的真实码它也能解，~10-20ms/张）。
-                # 真实场景反馈："明显二维码→疑似" 的根因就是 OpenCV 解码失败（seen=True
-                # decoded=[] 只能落疑似），pyzbar 把这类直接判回广告。
                 texts = decode_qr_texts(img)
-                if texts and any(re.search(r"t\.me|http|telegram", normalize_text(d)) for d in texts):
-                    reasons.append({"type": "qr", "label": f"二维码含链接 {texts[0][:60]}"})
+                link = _qr_link(texts)
+                structure = False
+                if not link:
+                    qr_img = ImageOps.contain(img, (1100, 1100)) if max(img.size) > 1100 else img
+                    decoded, structure = detect_qr(qr_img, retry_image=img if qr_img is not img else None)
+                    texts.extend(decoded)
+                    link = _qr_link(decoded)
+                if link:
+                    reasons.append({"type": "qr", "label": f"二维码含链接 {link[:60]}"})
                     verdict, score = "ad", 80
-                else:
-                    # pyzbar 解不出 → OpenCV 图形检测兜底（seen → 疑似）
-                    # QR 检测在 1400px 小图上跑（实测 2200px 需要 140ms，1400px 仅 18ms）；
-                    # 缩图只见图形解不出内容时用原图重试一次
-                    qr_img = img
-                    if max(img.size) > 1100:
-                        qr_img = ImageOps.contain(img, (1100, 1100))
-                    decoded, seen = detect_qr(qr_img)
-                    if seen and not decoded and qr_img is not img:
-                        decoded, seen = detect_qr(img)
-                    if decoded and any(re.search(r"t\.me|http|telegram", normalize_text(d)) for d in decoded):
-                        reasons.append({"type": "qr", "label": f"二维码含链接 {decoded[0][:60]}"})
-                        verdict, score = "ad", 80
-                    elif seen or texts:
-                        # 二维码存在但解不出链接（带 logo 的样式码/纯文本码）：记疑，
-                        # 继续让 OCR 尝试更强的文字证据，别在这里提前定案
-                        label = "检测到二维码图形" if seen else "二维码无链接内容"
-                        reasons.append({"type": "qr", "label": label})
-                        qr_suspect = True
+                elif texts or structure:
+                    label = '二维码无链接内容' if texts else '疑似二维码图形（未能解码）'
+                    reasons.append({"type": "qr", "label": label})
+                    qr_suspect = True
             except Exception:
                 pass
 

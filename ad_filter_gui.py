@@ -4472,23 +4472,33 @@ def gui_func_test() -> int:
         app.folder_bar.rebuild()   # 直接改 _roots 后须重建 chips（正常流程走 add_folders 会自动重建）
         app.cfg["ocr"]["enabled"] = True
         app.cfg["qr"]["enabled"] = True
-        app.start_scan()
-        started = pump(until=lambda: getattr(app, "_last_progress", 0) >= 3, timeout=60)
-        # —— 扫描中显示"当前扫描的文件名" + 当前文件夹高亮 ——
-        cur_label = app.folder_bar.lbl_current.text()
-        check("扫描中显示当前文件", "正在扫描" in cur_label and "." in cur_label, cur_label)
-        active = [c for c in app.folder_bar._chips.values() if c.property("active")]
-        check("当前文件夹 chip 高亮", len(active) >= 1, f"active={len(active)}")
-        app.toggle_pause()
-        pump(0.3)
-        p1 = getattr(app, "_last_progress", 0)
-        check("暂停按钮变继续", app.btn_pause.text() == "继续", app.btn_pause.text())
-        pump(1.6)
-        p2 = getattr(app, "_last_progress", 0)
-        # 语义：暂停后不再提交新任务，已在跑的当前批次（≤workers 个）会跑完才停
-        check("暂停后进度停住", started and (p2 - p1) <= 6, f"p1={p1} p2={p2}")
-        app.toggle_pause()
-        finished = pump(until=lambda: "扫描完成" in app.status.text(), timeout=120)
+        analyze = af.analyze_file
+
+        def paced_analyze(*args):
+            # 保证快速解码的样本也留出可暂停的窗口，仍执行实际识别。
+            time.sleep(.2)
+            return analyze(*args)
+
+        af.analyze_file = paced_analyze
+        try:
+            app.start_scan()
+            started = pump(until=lambda: app._last_progress >= 3, timeout=60)
+            cur_label = app.folder_bar.lbl_current.text()
+            check("扫描中显示当前文件", "正在扫描" in cur_label and "." in cur_label, cur_label)
+            active = [c for c in app.folder_bar._chips.values() if c.property("active")]
+            check("当前文件夹 chip 高亮", bool(active), f"active={len(active)}")
+            app.toggle_pause()
+            pump(0.3)
+            p1 = app._last_progress
+            check("暂停按钮变继续", app.btn_pause.text() == "继续", app.btn_pause.text())
+            pump(1.6)
+            p2 = app._last_progress
+            # 暂停后仅等待已在途的任务结束，不能提前完成所有文件。
+            check("暂停后进度停住", started and (p2 - p1) <= 6 and app._scan_running(), f"p1={p1} p2={p2}")
+            app.toggle_pause()
+            finished = pump(until=lambda: app._scan_outcome == 'complete', timeout=20)
+        finally:
+            af.analyze_file = analyze
         check("继续后扫描完成", finished, app.status.text()[:40])
         check("暂停按钮复位", app.btn_pause.text() == "暂停" and not app.btn_pause.isEnabled())
 
