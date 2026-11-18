@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
 """工作台配套窗口：统一标题、内容分区和固定操作栏。"""
-from PySide6.QtCore import Qt
+from html import escape
+from queue import Empty, SimpleQueue
+from threading import Thread
+
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel, QListWidget,
                                QPushButton, QScrollArea, QStackedWidget,
                                QVBoxLayout, QWidget)
 from qfluentwidgets import PrimaryPushButton, PushButton, isDarkTheme
 import cds_tokens as T
+import update_check
 
 
 class DialogHeader(QFrame):
@@ -181,7 +186,8 @@ class AboutDialog(WorkbenchDialog):
     def __init__(self, parent, version):
         super().__init__(parent)
         self.setFixedWidth(400)
-        self.preferred_height = 230
+        self.preferred_height = 316
+        self.version = version
         self.header_description = False
         self.viewLayout.addWidget(QLabel('关于广告图过滤', self))
         self.version_label = QLabel(f'版本 v{version}', self)
@@ -192,10 +198,69 @@ class AboutDialog(WorkbenchDialog):
         description.setObjectName('mutedText')
         description.setWordWrap(True)
         self.viewLayout.addWidget(description)
+        self.check_button = PushButton('检查更新', self)
+        self.check_button.setFixedHeight(34)
+        self.check_button.clicked.connect(self._check_updates)
+        self.viewLayout.addWidget(self.check_button, 0, Qt.AlignLeft)
+        self.update_status = QLabel('', self)
+        self.update_status.setTextFormat(Qt.PlainText)
+        self.update_status.setObjectName('mutedText')
+        self.update_status.setWordWrap(True)
+        self.viewLayout.addWidget(self.update_status)
+        self.update_link = QLabel('', self)
+        self.update_link.setTextFormat(Qt.RichText)
+        self.update_link.setTextInteractionFlags(Qt.LinksAccessibleByMouse | Qt.LinksAccessibleByKeyboard)
+        self.update_link.setOpenExternalLinks(True)
+        self.update_link.hide()
+        self.viewLayout.addWidget(self.update_link)
         self.viewLayout.addStretch()
         self.yesButton.hide()
         self.cancelButton.setText('关闭')
         style_dialog(self)
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(80)
+        self._update_timer.timeout.connect(self._show_update_result)
+        self.finished.connect(self._update_timer.stop)
+
+    def _check_updates(self):
+        if self._update_timer.isActive():
+            return
+        self.check_button.setEnabled(False)
+        self.update_status.setText('正在检查 GitHub 最新发行版…')
+        self.update_link.hide()
+        results = self._update_results = SimpleQueue()
+        version = self.version
+
+        def fetch():
+            # 工作线程只写结果队列，关闭弹窗后也不会访问 Qt 控件。
+            try:
+                results.put(update_check.check_latest(version))
+            except update_check.UpdateCheckError as error:
+                results.put(error)
+
+        self._update_timer.start()
+        Thread(target=fetch, daemon=True).start()
+
+    def _show_update_result(self):
+        try:
+            result = self._update_results.get_nowait()
+        except Empty:
+            return
+        self._update_timer.stop()
+        self.check_button.setEnabled(True)
+        if isinstance(result, update_check.UpdateCheckError):
+            self.update_status.setText(str(result))
+            url, label = update_check.RELEASES_URL, '打开 GitHub 发行页'
+        elif result is None:
+            self.update_status.setText('当前版本无需更新。')
+            return
+        else:
+            self.update_status.setText(f'发现新版 {result.version}' + ('。' if result.download_url else '，尚无 Windows EXE。'))
+            url = result.download_url or result.release_url
+            label = '下载 Windows EXE' if result.download_url else '查看新版发行页'
+        self.update_link.setText(f'<a href="{escape(url, quote=True)}">{label}</a>')
+        self.update_link.setToolTip(url)
+        self.update_link.show()
 
 
 class NoticeDialog(WorkbenchDialog):

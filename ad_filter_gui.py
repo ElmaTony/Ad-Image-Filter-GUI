@@ -4166,13 +4166,13 @@ def gui_func_test() -> int:
         def inspect_about():
             dialog = qapp.activeModalWidget()
             if isinstance(dialog, AboutDialog):
-                if dialog.version_label.isVisible():
+                if dialog.version_label.isVisible() and dialog.check_button.isVisible():
                     about_text.append(dialog.version_label.text())
                 dialog.reject()
 
         QTimer.singleShot(0, inspect_about)
         app.btn_about.click()
-        check('关于显示软件版本', about_text == [f'版本 v{qapp.applicationVersion()}'])
+        check('关于显示版本和检查更新入口', about_text == [f'版本 v{qapp.applicationVersion()}'])
 
         # —— 启动时不记忆上次扫描的文件夹 ——
         check("启动时文件夹列表为空", len(app.get_roots()) == 0,
