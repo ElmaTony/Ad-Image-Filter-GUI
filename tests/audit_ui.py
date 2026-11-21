@@ -161,7 +161,7 @@ def audit(app, theme, check, shot, pump):
 
     # —— 顶栏 ——
     top = app.top_bar
-    check(f"[{tag}] 顶栏高 58", top.height() == 58, f"h={top.height()}")
+    check(f"[{tag}] 顶栏高 48", top.height() == 48, f"h={top.height()}")
     check(f"[{tag}] 扫描钮 112x32", app.btn_scan.width() == 112 and app.btn_scan.height() == 32)
     check(f"[{tag}] 状态在底部独立状态栏", app.status_pill.parent() is app.footer)
     check(f"[{tag}] 状态胶囊高≤30", app.status_pill.height() <= 30, f"h={app.status_pill.height()}")
@@ -170,7 +170,7 @@ def audit(app, theme, check, shot, pump):
 
     # —— 筛选条 ——
     fb = app.filter_bar
-    check(f"[{tag}] 筛选条分行高 144", fb.height() == 144, f"h={fb.height()}")
+    check(f"[{tag}] 筛选条紧凑双行高 88", fb.height() == 88, f"h={fb.height()}")
     for w in (app.verdict_tabs, app.f_reason, app.f_search, app.f_sort):
         check(f"[{tag}] 筛选控件高30或32 ({w.__class__.__name__})", w.height() in (30, 32), f"h={w.height()}")
     for label, button in zip(('全部待审', '广告', '疑似', '异常'), app.verdict_tabs.buttons):
@@ -184,8 +184,8 @@ def audit(app, theme, check, shot, pump):
         check(f'[{tag}] {name}固定动作在详情内', p.x() < app.detail.width() and p.y() < app.detail.height())
     check(f"[{tag}] 计数区在处置条内", app.lbl_count.mapTo(bot := app.bot, app.lbl_count.rect().topRight()).x() <= bot.width())
 
-    # —— 网格卡片 ——
-    check(f"[{tag}] 网格单元 204x242", app.grid.gridSize() == __import__("PySide6.QtCore", fromlist=["QSize"]).QSize(204, 242),
+    # —— 网格卡片（默认紧凑密度 172x200）——
+    check(f"[{tag}] 网格单元 172x200", app.grid.gridSize() == __import__("PySide6.QtCore", fromlist=["QSize"]).QSize(172, 200),
           f"gs={app.grid.gridSize()}")
 
     # —— 侧栏已删（导航与顶栏/底栏重复）：必须不存在 ——
@@ -193,7 +193,7 @@ def audit(app, theme, check, shot, pump):
 
     # —— 底部条 ——
     bot = app.bot
-    check(f"[{tag}] 底栏停靠全宽", bot.width() >= W - 4 and bot.height() == 66,
+    check(f"[{tag}] 底栏停靠全宽", bot.width() >= W - 4 and bot.height() == 60,
           f"w={bot.width()} h={bot.height()}")
     bl = bot.layout()
     overflow = [bl.itemAt(i).widget().__class__.__name__

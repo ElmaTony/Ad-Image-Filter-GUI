@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""暖陶工作台的视图构造；扫描和文件操作仍由 App 协调。"""
+"""统一主题工作台的视图构造；扫描和文件操作仍由 App 协调。"""
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListView, QAbstractItemView,
@@ -13,25 +13,27 @@ import cds_tokens as T
 
 
 class ReviewCategories(QWidget):
-    """可见的审查分类；原 ComboBox 继续提供兼容索引和变更信号。"""
+    """可见的审查分类分段胶囊；原 ComboBox 继续提供兼容索引和变更信号。"""
     LABELS = ('全部待审', '广告', '疑似', '异常')
     ROLES = ('clay', 'ad', 'suspect', 'error')
 
     def __init__(self, control, parent):
         super().__init__(parent)
         self.control = control
+        self.setObjectName('categoryTrack')
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setFixedHeight(32)
         self.counts = (0, 0, 0, 0)
         self._rendered = None
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(2)
         self.group = QButtonGroup(self)
         self.buttons = []
         for index, label in enumerate(self.LABELS):
             button = QPushButton(label, self)
             button.setCheckable(True)
-            button.setFixedHeight(32)
+            button.setFixedHeight(26)
             button.setCursor(Qt.PointingHandCursor)
             self.group.addButton(button, index)
             layout.addWidget(button)
@@ -40,13 +42,23 @@ class ReviewCategories(QWidget):
         control.currentIndexChanged.connect(lambda _: self.update_counts(self.counts))
         self.update_counts(self.counts)
 
+    def refresh_theme(self):
+        self._rendered = None
+        self.update_counts(self.counts)
+
     def update_counts(self, counts):
         self.counts = tuple(counts)
         dark = isDarkTheme()
-        key = (self.counts, self.control.currentIndex(), dark)
+        key = (self.counts, self.control.currentIndex(), dark, T.get_palette())
         if key == self._rendered:
             return
         self._rendered = key
+        track_bg = T.c(dark, T.T.seg_track)
+        pill_bg = T.c(dark, T.T.seg_pill)
+        border = T.c(dark, T.T.border)
+        accent = T.c(dark, T.T.clay)
+        self.setStyleSheet(
+            f'#categoryTrack {{ background:{track_bg}; border-radius:9px; }}')
         for index, (label, role, count, button) in enumerate(zip(self.LABELS, self.ROLES, counts, self.buttons)):
             active = self.control.currentIndex() == index
             button.setChecked(active)
@@ -54,12 +66,76 @@ class ReviewCategories(QWidget):
             button.setAccessibleName(f'{label}，{count} 张')
             button.setToolTip(f'{label}：{count} 张；正常图片不进入待审列表')
             fg, fill, edge = T.sem(dark, role)
-            button.setStyleSheet(
-                f'QPushButton {{ color:{fg}; background:{fill if active else "transparent"};'
-                f' border:1px solid {edge if active else T.c(dark, T.T.border)};'
-                f' border-radius:8px; padding:0 9px; font-weight:{600 if active else 400}; }}'
-                f'QPushButton:hover {{ background:{fill}; }}'
-                f'QPushButton:focus {{ border:2px solid {T.BRAND}; }}')
+            if active:
+                button.setStyleSheet(
+                    f'QPushButton {{ color:{fg}; background:{pill_bg};'
+                    f' border:1px solid {edge if index > 0 else border};'
+                    f' border-radius:6px; padding:0 8px; font-size:12px; font-weight:600; }}'
+                    f'QPushButton:focus {{ border:1.5px solid {accent}; }}')
+            else:
+                text_idle = T.c(dark, T.T.text_2) if index == 0 else fg
+                button.setStyleSheet(
+                    f'QPushButton {{ color:{text_idle}; background:transparent;'
+                    f' border:1px solid transparent;'
+                    f' border-radius:6px; padding:0 8px; font-size:12px; font-weight:400; }}'
+                    f'QPushButton:hover {{ background:{fill}; color:{fg}; }}'
+                    f'QPushButton:focus {{ border:1.5px solid {accent}; }}')
+
+
+class DensitySwitcher(QWidget):
+    """三档卡片网格密度切换器（紧凑 / 标准 / 大图）。"""
+
+    def __init__(self, on_change, parent=None):
+        super().__init__(parent)
+        self._on_change = on_change
+        self._current = T.DEFAULT_DENSITY
+        self.setObjectName('densityTrack')
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFixedHeight(28)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(2)
+        self.buttons = {}
+        for key in T.DENSITY_ORDER:
+            spec = T.DENSITIES[key]
+            btn = QPushButton(spec['short'], self)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setCheckable(True)
+            btn.setFixedSize(26, 24)
+            btn.setToolTip(f"切换为{spec['label']}卡片密度")
+            btn.setAccessibleName(f"{spec['label']}卡片密度")
+            btn.clicked.connect(lambda _=False, k=key: self._on_change(k))
+            lay.addWidget(btn)
+            self.buttons[key] = btn
+        self.refresh_theme()
+
+    def set_density(self, key: str):
+        if key not in self.buttons:
+            key = T.DEFAULT_DENSITY
+        self._current = key
+        self.refresh_theme()
+
+    def refresh_theme(self):
+        dark = isDarkTheme()
+        track = T.c(dark, T.T.seg_track)
+        pill = T.c(dark, T.T.seg_pill)
+        border = T.c(dark, T.T.border)
+        accent = T.c(dark, T.T.clay)
+        txt2 = T.c(dark, T.T.text_2)
+        hov = T.c(dark, T.T.hover)
+        self.setStyleSheet(f'#densityTrack {{ background:{track}; border-radius:7px; }}')
+        for key, btn in self.buttons.items():
+            active = key == self._current
+            btn.setChecked(active)
+            if active:
+                btn.setStyleSheet(
+                    f'QPushButton {{ background:{pill}; color:{accent}; border:1px solid {border};'
+                    f' border-radius:5px; font-size:11px; font-weight:600; padding:0; }}')
+            else:
+                btn.setStyleSheet(
+                    f'QPushButton {{ background:transparent; color:{txt2}; border:none;'
+                    f' border-radius:5px; font-size:11px; font-weight:400; padding:0; }}'
+                    f'QPushButton:hover {{ background:{hov}; color:{accent}; }}')
 
 
 def adapt_workbench(app):
@@ -77,8 +153,10 @@ def adapt_workbench(app):
         layout.removeWidget(app.disposal_controls)
         layout.addWidget(app.disposal_controls, 1 if narrow else 0, 0 if narrow else 1,
                          1, 2 if narrow else 1)
-    app.bot.setFixedHeight(102 if narrow else 66)
+    app.bot.setFixedHeight(96 if narrow else 60)
     app.local_notice.setVisible(not narrow)
+    if hasattr(app, 'results_scope'):
+        app.results_scope.setVisible(app.width() >= 1020)
     app.status.setMaximumWidth(max(160, app.width() - 410))
 
 
@@ -102,7 +180,7 @@ def configure_fonts():
 
 def build_workbench(app):
     # 延迟导入避免主模块与视图模块的初始化循环。
-    from ad_filter_gui import FolderBar, StatusDot, Segmented, CardDelegate, ScrollFade, CARD_W, CARD_H
+    from ad_filter_gui import FolderBar, StatusDot, Segmented, CardDelegate, ScrollFade
     from cds_widgets import CDSEmptyState
     from cds_layouts import LayoutManager
 
@@ -120,13 +198,14 @@ def build_workbench(app):
         setattr(app, name, w)
         return w
 
+    # ---- Layer 1: 紧凑顶栏 (48px) ----
     top = QWidget(app)
     top.setObjectName('topBar')
-    top.setFixedHeight(58)
+    top.setFixedHeight(48)
     app.top_bar = top
     tl = QHBoxLayout(top)
-    tl.setContentsMargins(18, 0, 18, 0)
-    tl.setSpacing(6)
+    tl.setContentsMargins(16, 0, 16, 0)
+    tl.setSpacing(5)
     tl.addWidget(button('btn_add', '添加文件夹', app.add_folder, top, FIF.FOLDER_ADD))
     tl.addWidget(button('btn_scan', '开始扫描', app.start_scan, top, FIF.PLAY, True))
     app.btn_scan.setFixedWidth(112)
@@ -146,6 +225,7 @@ def build_workbench(app):
     tl.addWidget(button('btn_more_actions', '更多', app.open_workbench_menu, top, FIF.MORE))
     root.addWidget(top)
 
+    # ---- Layer 2: 紧凑来源文件夹条 (38px) ----
     app.folder_bar = FolderBar(app)
     app.folder_bar.rebuild()
     root.addWidget(app.folder_bar)
@@ -169,32 +249,45 @@ def build_workbench(app):
     ll.setSpacing(0)
     app.results_panel = left
 
+    # ---- 精简双行筛选工具带 (88px，原 144px 省 56px) ----
     fbar = QWidget(left)
     fbar.setObjectName('filterBar')
-    fbar.setFixedHeight(144)
+    fbar.setFixedHeight(88)
     app.filter_bar = fbar
     fl = QVBoxLayout(fbar)
-    fl.setContentsMargins(20, 12, 20, 6)
-    fl.setSpacing(8)
+    fl.setContentsMargins(16, 8, 16, 6)
+    fl.setSpacing(6)
+
+    # 第 1 行：分类分段胶囊 + 清除筛选 | 显示范围 + 三档密度 + 导出
     heading = QHBoxLayout()
+    heading.setSpacing(6)
     app.f_verdict = ComboBox(fbar)
     app.f_verdict.addItems(['全部待审', '广告', '疑似', '异常'])
     app.f_verdict.setFixedHeight(32)
     app.f_verdict.hide()
     app.verdict_tabs = ReviewCategories(app.f_verdict, fbar)
     heading.addWidget(app.verdict_tabs)
-    heading.addStretch()
     app.btn_reset_filters = button('btn_reset_filters', '清除筛选', app.clear_filters, fbar)
+    app.btn_reset_filters.setFixedHeight(28)
     heading.addWidget(app.btn_reset_filters)
+    heading.addStretch(1)
+    app.results_scope = CaptionLabel('显示 0 / 待审 0', fbar)
+    heading.addWidget(app.results_scope)
+    app.density_tabs = DensitySwitcher(app.set_density, fbar)
+    heading.addWidget(app.density_tabs)
+    heading.addWidget(button('btn_export', '导出', app.export_report, fbar, FIF.SAVE))
+    app.btn_export.setFixedHeight(28)
+    app.btn_export.setToolTip('导出当前筛选结果，保持当前排序')
     fl.addLayout(heading)
     app.f_verdict.currentIndexChanged.connect(lambda _: app.refresh())
 
+    # 第 2 行：搜索框 + 原因 + 排序 + 批量选择工具
     filters = QHBoxLayout()
-    filters.setSpacing(8)
+    filters.setSpacing(6)
     app.f_search = SearchLineEdit(fbar)
     app.f_search.setPlaceholderText('搜索文件名或路径')
-    app.f_search.setMinimumWidth(110)
-    app.f_search.setFixedHeight(32)
+    app.f_search.setMinimumWidth(96)
+    app.f_search.setFixedHeight(30)
     app._search_timer = QTimer(app)
     app._search_timer.setSingleShot(True)
     app._search_timer.setInterval(250)
@@ -203,23 +296,17 @@ def build_workbench(app):
     filters.addWidget(app.f_search, 1)
     app.f_reason = ComboBox(fbar)
     app.f_reason.addItem('全部原因')
-    app.f_reason.setFixedWidth(126)
+    app.f_reason.setFixedWidth(116)
     app.f_reason.setFixedHeight(30)
     app.f_reason.currentIndexChanged.connect(lambda _: app.refresh())
     filters.addWidget(app.f_reason)
     app.f_sort = ComboBox(fbar)
     app.f_sort.addItems(['默认顺序', '名称', '大小', '修改时间', '分数'])
-    app.f_sort.setFixedWidth(104)
+    app.f_sort.setFixedWidth(98)
     app.f_sort.setFixedHeight(30)
     app.f_sort.currentIndexChanged.connect(lambda _: app.refresh())
     filters.addWidget(app.f_sort)
-    fl.addLayout(filters)
 
-    tools = QHBoxLayout()
-    tools.setSpacing(6)
-    app.results_scope = CaptionLabel('显示 0 / 待审 0', fbar)
-    tools.addWidget(app.results_scope)
-    tools.addStretch()
     app.selection_tools = QWidget(fbar)
     st = QHBoxLayout(app.selection_tools)
     st.setContentsMargins(0, 0, 0, 0)
@@ -229,19 +316,20 @@ def build_workbench(app):
         ('btn_clear', '清除', app.clear_sel), ('btn_similar', '相似组', app.select_similar_groups),
     ):
         b = button(name, text, fn, app.selection_tools)
-        b.setMinimumWidth(42)
+        b.setFixedHeight(28)
+        b.setMinimumWidth(38)
         st.addWidget(b)
     app.btn_similar.setToolTip('勾选全部相似组中的图片')
-    tools.addWidget(app.selection_tools)
-    tools.addWidget(button('btn_export', '导出', app.export_report, fbar, FIF.SAVE))
-    app.btn_export.setToolTip('导出当前筛选结果，保持当前排序')
-    fl.addLayout(tools)
+    filters.addWidget(app.selection_tools)
+    fl.addLayout(filters)
     ll.addWidget(fbar)
 
+    # ---- 图片墙画布 ----
+    dspec = T.density_spec(getattr(app, 'density', T.DEFAULT_DENSITY))
     gwrap = QWidget(left)
     gwrap.setObjectName('gridWrap')
     gl = QVBoxLayout(gwrap)
-    gl.setContentsMargins(14, 5, 10, 12)
+    gl.setContentsMargins(12, 6, 8, 8)
     gl.setSpacing(0)
     grid = QListView(gwrap)
     grid.setObjectName('grid')
@@ -249,7 +337,7 @@ def build_workbench(app):
     grid.setResizeMode(QListView.Adjust)
     grid.setMovement(QListView.Static)
     grid.setUniformItemSizes(True)
-    grid.setGridSize(QSize(CARD_W + 8, CARD_H + 8))
+    grid.setGridSize(QSize(dspec['grid_w'], dspec['grid_h']))
     grid.setSelectionMode(QAbstractItemView.ExtendedSelection)
     grid.setSelectionRectVisible(False)
     grid.setModel(app.model)
@@ -260,6 +348,7 @@ def build_workbench(app):
     app.grid = grid
     app.delegate = CardDelegate(app.thumbs, app.model, grid)
     app.delegate.dark = isDarkTheme()
+    app.delegate.set_density(getattr(app, 'density', T.DEFAULT_DENSITY))
     grid.setItemDelegate(app.delegate)
     grid.selectionModel().currentChanged.connect(app._on_current_changed)
     grid.selectionModel().selectionChanged.connect(app._on_multi_select)
@@ -284,13 +373,14 @@ def build_workbench(app):
     gl.addWidget(grid)
     ll.addWidget(gwrap, 1)
 
+    # ---- 右侧详情面板 ----
     detail = QWidget(splitter)
     detail.setObjectName('detailPanel')
     detail.setMinimumWidth(320)
     detail.setMaximumWidth(520)
     app.detail = detail
     dv = QVBoxLayout(detail)
-    dv.setContentsMargins(18, 12, 18, 12)
+    dv.setContentsMargins(16, 10, 16, 10)
     dv.setSpacing(8)
     dh = QHBoxLayout()
     dh.addWidget(CaptionLabel('图片详情', detail))
@@ -322,19 +412,19 @@ def build_workbench(app):
     app.detail_filename.setObjectName('detailFilename')
     app.detail_filename.setWordWrap(True)
     app.detail_filename.setTextInteractionFlags(Qt.TextSelectableByMouse)
-    app.detail_filename.setMaximumHeight(42)
+    app.detail_filename.setMaximumHeight(40)
     body_layout.addWidget(app.detail_filename)
-    app.info = TextEdit(detail)
-    app.info.setReadOnly(True)
-    app.info.setMinimumHeight(100)
-    app.info.setMaximumHeight(240)
-    body_layout.addWidget(app.info, 1)
     app.detail_path = QLabel('', detail)
     app.detail_path.setObjectName('detailPath')
     app.detail_path.setWordWrap(True)
-    app.detail_path.setMaximumHeight(36)
+    app.detail_path.setMaximumHeight(34)
     app.detail_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
     body_layout.addWidget(app.detail_path)
+    app.info = TextEdit(detail)
+    app.info.setReadOnly(True)
+    app.info.setMinimumHeight(96)
+    app.info.setMaximumHeight(240)
+    body_layout.addWidget(app.info, 1)
     nav = QHBoxLayout()
     nav.setSpacing(4)
     nav.addWidget(button('btn_prev', '上一张', lambda: app.step(-1), detail, FIF.LEFT_ARROW))
@@ -344,6 +434,7 @@ def build_workbench(app):
     nav.addWidget(button('btn_next', '下一张', lambda: app.step(1), detail, FIF.RIGHT_ARROW))
     dv.addLayout(nav)
     actions = QHBoxLayout()
+    actions.setSpacing(6)
     app.btn_mark = PushButton('标记广告', detail)
     app.btn_mark.setToolTip('加入待处置；不修改自动判定和规则')
     app.btn_mark.clicked.connect(lambda: app.mark_current(True))
@@ -357,20 +448,21 @@ def build_workbench(app):
     dv.addLayout(actions)
     splitter.setStretchFactor(0, 1)
     splitter.setStretchFactor(1, 0)
-    splitter.setSizes([1000, 360])
+    splitter.setSizes([1020, 340])
     splitter.splitterMoved.connect(lambda *_: app._resize_timer.start())
 
+    # ---- 紧凑底部处置条 (60px / 窄屏 96px) ----
     bot = QWidget(app)
     bot.setObjectName('bottomBar')
-    bot.setFixedHeight(66)
+    bot.setFixedHeight(60)
     app.bot = bot
     bl = QGridLayout(bot)
-    bl.setContentsMargins(18, 6, 18, 6)
-    bl.setSpacing(6)
+    bl.setContentsMargins(16, 4, 16, 4)
+    bl.setSpacing(4)
     app.lbl_count = QWidget(bot)
     cl = QVBoxLayout(app.lbl_count)
     cl.setContentsMargins(0, 0, 0, 0)
-    cl.setSpacing(0)
+    cl.setSpacing(2)
     app.pill_sel = QLabel('已选 0 张', app.lbl_count)
     app.pill_sel.setObjectName('countPill')
     app.pill_sel.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
@@ -378,13 +470,13 @@ def build_workbench(app):
     cl.addWidget(app.pill_sel)
     scope_row = QHBoxLayout()
     scope_row.setContentsMargins(0, 0, 0, 0)
-    scope_row.setSpacing(8)
+    scope_row.setSpacing(6)
     scope_row.addWidget(app.selection_scope)
     app.btn_selected = button('btn_selected', '查看已选',
         lambda: app.set_selected_only(app.btn_selected.isChecked()), app.lbl_count)
     app.btn_selected.setCheckable(True)
-    app.btn_selected.setFixedHeight(22)
-    app.btn_selected.setFixedWidth(80)
+    app.btn_selected.setFixedHeight(24)
+    app.btn_selected.setMinimumWidth(68)
     scope_row.addWidget(app.btn_selected)
     scope_row.addStretch()
     cl.addLayout(scope_row)
@@ -393,11 +485,11 @@ def build_workbench(app):
     app.disposal_controls = QWidget(bot)
     controls = QHBoxLayout(app.disposal_controls)
     controls.setContentsMargins(0, 0, 0, 0)
-    controls.setSpacing(10)
+    controls.setSpacing(8)
     app.lbl_disposal = CaptionLabel('处置方式', bot)
     controls.addWidget(app.lbl_disposal)
     app.seg_disposal = Segmented([('隔离', 'quarantine'), ('回收站', 'recycle'), ('删除', 'delete')], bot)
-    app.seg_disposal.setFixedWidth(216)
+    app.seg_disposal.setFixedWidth(210)
     app.seg_disposal.setToolTip('隔离可撤销；回收站由系统恢复；删除不可恢复')
     app.btn_dq, app.btn_dr, app.btn_dd = app.seg_disposal._btns
     app.seg_disposal.valueChanged.connect(lambda _: app._update_count_label())
@@ -406,19 +498,20 @@ def build_workbench(app):
     app.btn_undo.setEnabled(False)
     controls.addWidget(button('btn_dispose', '隔离 0 张', app.execute_disposal, bot, FIF.DELETE, True))
     bl.addWidget(app.disposal_controls, 0, 1)
-    app.btn_dispose.setMinimumWidth(132)
+    app.btn_dispose.setMinimumWidth(128)
     root.addWidget(bot)
 
+    # ---- 极简底栏状态 (30px) ----
     footer = QWidget(app)
     footer.setObjectName('footerBar')
-    footer.setFixedHeight(36)
+    footer.setFixedHeight(30)
     app.footer = footer
     ft = QHBoxLayout(footer)
-    ft.setContentsMargins(18, 0, 18, 0)
-    ft.setSpacing(10)
+    ft.setContentsMargins(16, 0, 16, 0)
+    ft.setSpacing(8)
     app.status_pill = QWidget(footer)
     app.status_pill.setObjectName('statusPill')
-    app.status_pill.setFixedHeight(26)
+    app.status_pill.setFixedHeight(22)
     sl = QHBoxLayout(app.status_pill)
     sl.setContentsMargins(8, 0, 8, 0)
     sl.setSpacing(5)
@@ -436,7 +529,9 @@ def build_workbench(app):
     app.local_notice = CaptionLabel('仅在本地分析', footer)
     ft.addWidget(app.local_notice)
     ft.addWidget(button('btn_openq', '隔离目录', app.open_quarantine_dir, footer))
+    app.btn_openq.setFixedHeight(26)
     ft.addWidget(button('btn_log', '操作日志', lambda: None, footer))
+    app.btn_log.setFixedHeight(26)
     app.btn_log.setCheckable(True)
     app.btn_log.toggled.connect(app.toggle_log)
     root.addWidget(footer)
@@ -449,6 +544,7 @@ def build_workbench(app):
     app.lm = LayoutManager(app)
     app.layout_mode = 'workbench'
     app.lm.apply('workbench')
+    app.density_tabs.set_density(getattr(app, 'density', T.DEFAULT_DENSITY))
     app._empty = CDSEmptyState('', '开始一次图片审查', '添加本地文件夹，或把文件夹拖入窗口。\n所有识别均在本机完成。', gwrap)
     app._empty.setAttribute(Qt.WA_TransparentForMouseEvents)
     app._empty.hide()

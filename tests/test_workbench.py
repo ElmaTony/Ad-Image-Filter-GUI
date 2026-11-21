@@ -569,6 +569,7 @@ class WorkbenchTests(unittest.TestCase):
 
     def test_theme_toggle_refreshes_segmented_button_text_contrast(self):
         from qfluentwidgets import isDarkTheme
+        import cds_tokens as CDST
         self.app.seg_disposal.set_index(0, animate=False)
         before_dark = isDarkTheme()
         before_qss = self.app.btn_dq.styleSheet()
@@ -577,7 +578,7 @@ class WorkbenchTests(unittest.TestCase):
         after_dark = isDarkTheme()
         after_qss = self.app.btn_dq.styleSheet()
         self.assertNotEqual(before_dark, after_dark)
-        expected_color = '#f5f5f5' if after_dark else '#151515'
+        expected_color = CDST.c(after_dark, CDST.T.text)
         self.assertIn(expected_color, after_qss)
         self.assertNotEqual(before_qss, after_qss)
 
@@ -735,6 +736,51 @@ class WorkbenchTests(unittest.TestCase):
         self.assertLessEqual(pal.y() + pal.height(), self.app.height())
         pal.list.itemClicked.emit(pal.list.item(0))
         self.assertEqual(ran, [True])
+
+    def test_multi_palette_and_three_density_modes_persist(self):
+        import cds_tokens as CDST
+        from PySide6.QtCore import QSize
+        # 默认：宣纸暖陶 2.0 + 紧凑密度
+        self.assertEqual(self.app.palette_name, 'atelier')
+        self.assertEqual(self.app.density, 'compact')
+        self.assertEqual(self.app.grid.gridSize(), QSize(172, 200))
+
+        # 依次切换全部 4 套主题色盘
+        for key in CDST.PALETTE_ORDER:
+            self.app.set_palette(key)
+            self.pump(.05)
+            self.assertEqual(CDST.get_palette(), key)
+            self.assertEqual(self.app.cfg['ui_palette'], key)
+            r, g, b = CDST.accent_rgb(self.app.theme == 'dark')
+            self.assertIn(f'{r},{g},{b}', self.app._sel_band.styleSheet())
+
+        # 依次通过 UI 切换三档密度并验证网格和委托尺寸
+        for key, expected in (('standard', QSize(204, 242)), ('large', QSize(260, 294)), ('compact', QSize(172, 200))):
+            self.app.density_tabs.buttons[key].click()
+            self.pump(.05)
+            self.assertEqual(self.app.density, key)
+            self.assertEqual(self.app.cfg['ui_density'], key)
+            self.assertEqual(self.app.grid.gridSize(), expected)
+            self.assertTrue(self.app.density_tabs.buttons[key].isChecked())
+
+        # 通过设置弹窗「外观与主题」页修改并保存
+        dlg = self.app.build_config()
+        try:
+            self.assertEqual(dlg.navigation.count(), 4)
+            dlg.navigation.setCurrentRow(3)
+            dlg.cb_palette.setCurrentIndex(1)  # slate
+            dlg.cb_density.setCurrentIndex(1)  # standard
+            self.assertTrue(dlg.validate())
+            self.assertEqual(self.app.palette_name, 'slate')
+            self.assertEqual(self.app.density, 'standard')
+            reloaded = af.load_config()
+            self.assertEqual(reloaded['ui_palette'], 'slate')
+            self.assertEqual(reloaded['ui_density'], 'standard')
+        finally:
+            dlg.close()
+            dlg.deleteLater()
+            self.app.set_palette('atelier', save=False)
+            self.app.set_density('compact', save=False)
 
 
 if __name__ == '__main__':

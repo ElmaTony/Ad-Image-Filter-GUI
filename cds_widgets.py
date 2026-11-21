@@ -204,20 +204,22 @@ class CDSCommandPalette(QWidget):
 
     def refresh_theme(self, dark: bool):
         self.dark = dark
+        accent = T.c(dark, TT.clay)
         self.setStyleSheet(
             f"CDSCommandPalette {{ background: {T.c(dark, TT.surface2)};"
             f" border: 1px solid {T.c(dark, TT.border)}; border-radius: {T.R_XL}px; }}"
             f"QLabel {{ color:{T.c(dark, TT.text)}; background:transparent; }}"
             f"QLabel#commandHint {{ color:{T.c(dark, TT.text_2)}; font-size:11px; }}"
             f"QPushButton {{ color:{T.c(dark, TT.text_2)}; border:none; border-radius:6px; }}"
-            f"QPushButton:hover {{ background:{T.c(dark, TT.clay_fill)}; }}")
+            f"QPushButton:hover {{ background:{T.c(dark, TT.clay_fill)}; color:{accent}; }}")
         self.edit.setStyleSheet(
             f"QLineEdit {{ background: {T.c(dark, TT.surface3)}; border: 1px solid {T.c(dark, TT.border)};"
-            f" border-radius: {T.R_MD}px; padding: 0 10px; color: {T.c(dark, TT.text)}; }}")
+            f" border-radius: {T.R_MD}px; padding: 0 10px; color: {T.c(dark, TT.text)}; }}"
+            f"QLineEdit:focus {{ border-color: {accent}; }}")
         self.list.setStyleSheet(
             f"QListWidget {{ background: transparent; color: {T.c(dark, TT.text)}; }}"
             f"QListWidget::item {{ padding: 7px 10px; border-radius: {T.R_SM}px; }}"
-            f"QListWidget::item:selected {{ background: {T.c(dark, TT.clay_fill)}; color: {T.CLAY}; }}")
+            f"QListWidget::item:selected {{ background: {T.c(dark, TT.clay_fill)}; color: {accent}; font-weight: 600; }}")
 
     def _filter(self, q):
         self.list.clear()

@@ -134,11 +134,8 @@ class ThumbCache(QObject):
         if pm.isNull():
             self._mark_failed(path)
             return
-        # 预缩放到卡片显示尺寸：委托 paint 每帧 scaled 会被滚动放大成 CPU 热点
-        # 缩略图预缩放：高度须与绘制框一致——卡片 opt.rect 上下各内缩 5px（见 paint 的
-        # r = opt.rect.adjusted(5,5,-5,-5)），故再减 10；否则 pix 比 img_r 高 10px，
-        # 居中后向下溢出 5px 压住文件名（用户报"图片遮挡图片名"）
-        pm = pm.scaled(CARD_W - 16, CARD_H - 10 - 86, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        # 预缩放到大图密度上限，确保紧凑/标准/大图三档卡片都清晰流畅
+        pm = pm.scaled(240, 210, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         with self._lock:
             self._cache[path] = pm
             while len(self._cache) > self._max:
@@ -197,22 +194,25 @@ class CardDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self.thumbs = thumbs
         self.model = model
-        # CDS 排版：正文 13px / 次级 11px / 等宽数字 11px（原 8pt≈10.7px 偏小，是"糙"的根源）
         self._f_name = QFont("Microsoft YaHei UI")
-        self._f_name.setPixelSize(13)
+        self._f_name.setPixelSize(12)
         self._f_name.setWeight(QFont.DemiBold)
         self._f_reason = QFont("Microsoft YaHei UI")
-        self._f_reason.setPixelSize(12)
-        self._f_badge = QFont("Cascadia Mono", 8)   # 等宽数字（tabular-nums）
-        self._f_badge.setPixelSize(11)
+        self._f_reason.setPixelSize(11)
+        self._f_badge = QFont("Microsoft YaHei UI")
+        self._f_badge.setPixelSize(10)
         self._f_badge.setBold(True)
         self._fm_name = QFontMetrics(self._f_name)
         self._fm_reason = QFontMetrics(self._f_reason)
         self._fm_badge = QFontMetrics(self._f_badge)
         self._birth: dict = {}   # path -> 出生时刻（入场动画用）
-        # 主题由 App._apply_theme 统一推送（paint 里不再自己读 isDarkTheme——
-        # 曾出现框架浅色而卡片画成深色的不一致，改为单一来源）
         self.dark = True
+        self.density = CDST.DEFAULT_DENSITY
+        self._dspec = CDST.density_spec(self.density)
+
+    def set_density(self, density: str):
+        self.density = density if density in CDST.DENSITIES else CDST.DEFAULT_DENSITY
+        self._dspec = CDST.density_spec(self.density)
 
     def note_birth(self, paths):
         now = time.time()
@@ -227,11 +227,11 @@ class CardDelegate(QStyledItemDelegate):
 
     @staticmethod
     def _elide_bidir(name, fm, width):
-        """双向智能截断：保留扩展名，中间用 … 连接（附件磁贴算法）。"""
+        """双向智能截断：保留扩展名，中间用 … 连接。"""
         if fm.horizontalAdvance(name) <= width:
             return name
         stem, dot, ext = name.rpartition(".")
-        tail = (stem[-7:] + dot + ext) if dot else name[-9:]
+        tail = (stem[-6:] + dot + ext) if dot else name[-8:]
         head_budget = width - fm.horizontalAdvance("…" + tail)
         head = fm.elidedText(stem if dot else name, Qt.ElideRight, max(10, head_budget))
         return head + "…" + tail
@@ -242,7 +242,8 @@ class CardDelegate(QStyledItemDelegate):
         it = self.model.items[idx.row()]
         p.save()
         p.setRenderHint(QPainter.Antialiasing)
-        # —— 入场动画（CDS file-thumbnail-grow-in）：250ms scale 0.85→1 + 渐显 ——
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        # —— 入场动画：250ms scale 0.88→1 + 渐显 ——
         born = self._birth.get(it["path"])
         if born is not None:
             age = time.time() - born
@@ -252,13 +253,11 @@ class CardDelegate(QStyledItemDelegate):
             if age < 0.25:
                 k = age / 0.25
                 p.setOpacity(k)
-                s = 0.85 + 0.15 * k
+                s = 0.88 + 0.12 * k
                 c = opt.rect.center()
                 p.translate(c.x(), c.y())
                 p.scale(s, s)
                 p.translate(-c.x(), -c.y())
-        # 主题：**直接读主窗口当前的 theme 字段**（toggle_theme/__init__ 里与界面 QSS
-        # 同一次赋值，天然同源；不经过任何缓存推送，杜绝"界面浅色而卡片深色"）。
         try:
             _win = self.parent().window() if self.parent() else None
             _t = getattr(_win, "theme", None)
@@ -267,149 +266,171 @@ class CardDelegate(QStyledItemDelegate):
             dark = self.dark
         r = QRect(opt.rect).adjusted(5, 5, -5, -5)
         from PySide6.QtWidgets import QStyle
+        from PySide6.QtGui import QPainterPath
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)
         hovered = bool(opt.state & QStyle.StateFlag.State_MouseOver)
-        # hover：抬升 -1.5px（CDS CARD_HOVER_LIFT）+ 下缘投影
-        # 原实现三层黑色圆角矩形**覆盖整个卡片区域**，靠不透明卡面盖住；一旦卡片
-        # 半透明（选中态 clay_fill 6%）黑底就透出来——用户报"选中还是黑色"的根因。
-        # 现在投影只画在卡片下缘之外的窄条，永不进入卡面。
+        checked = it["path"] in self.model.checked
+        accent_hex = CDST.c(dark, CDSTT.clay)
+        accent_rgb = CDST.accent_rgb(dark)
+
+        # 悬停微抬升 + 柔和底缘投影（仅在卡面外）
         if hovered:
-            for dy, al in ((7, 26 if dark else 16), (4, 34 if dark else 22)):
+            for dy, al in ((6, 24 if dark else 14), (3, 30 if dark else 18)):
                 p.setPen(Qt.NoPen)
                 p.setBrush(QColor(0, 0, 0, al))
-                p.drawRoundedRect(QRect(r.left() + 4, r.bottom() - 3 + dy,
-                                        r.width() - 8, 9), 6, 6)
+                p.drawRoundedRect(QRect(r.left() + 6, r.bottom() - 3 + dy,
+                                        r.width() - 12, 8), 5, 5)
             p.translate(0, CDST.CARD_HOVER_LIFT)
-        # 卡面：**必须先铺不透明底**（选中/非选中相同），选中再叠一层淡 clay wash——
-        # 这样任何下层内容（投影/视口底色）都不会从半透明填充里透出来
+
+        # 卡片底层（先铺不透明卡面，勾选/选中再叠主题淡底）
         p.setPen(Qt.NoPen)
         p.setBrush(_qc(CDST.c(dark, CDSTT.surface2)))
         p.drawRoundedRect(r, CDST.R_CARD, CDST.R_CARD)
-        if selected:
+        if checked or selected:
             p.setBrush(_qc(CDST.c(dark, CDSTT.clay_fill)))
             p.drawRoundedRect(r, CDST.R_CARD, CDST.R_CARD)
-        # 单闭合边框原则：只有卡片这一层闭合框
+
+        # 卡片边框与聚焦环
         p.setBrush(Qt.NoBrush)
-        if selected:
+        if checked:
+            p.setPen(QPen(_qc(accent_hex), 1.6))
+        elif selected:
             p.setPen(QPen(_qc(CDST.c(dark, CDSTT.border_clay)), 1.5))
         elif hovered:
-            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.border_strong)), 1))
+            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.border_strong)), 1.0))
         else:
-            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.border)), 1))
+            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.border)), 1.0))
         p.drawRoundedRect(r, CDST.R_CARD, CDST.R_CARD)
         if selected:
-            # 双环聚焦协议：外环 clay + 内环 surface1
-            p.setPen(QPen(_qc(CDST.CLAY), 1.5))
+            p.setPen(QPen(QColor(*accent_rgb, 110 if dark else 95), 1.5))
             p.drawRoundedRect(r.adjusted(-2, -2, 2, 2), CDST.R_CARD + 2, CDST.R_CARD + 2)
-            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.surface1)), 1))
-            p.drawRoundedRect(r.adjusted(2, 2, -2, -2), CDST.R_CARD - 2, CDST.R_CARD - 2)
-        img_r = QRect(r.left() + 8, r.top() + 8, r.width() - 16, r.height() - 86)
+
+        # —— 满幅圆角预览区 ——
+        footer_h = self._dspec["footer_h"]
+        img_r = QRect(r.left() + 6, r.top() + 6, r.width() - 12, max(40, r.height() - footer_h - 6))
+        img_clip = QPainterPath()
+        img_clip.addRoundedRect(img_r, CDST.R_LG, CDST.R_LG)
+        p.save()
+        p.setClipPath(img_clip)
+        p.fillRect(img_r, _qc(CDST.c(dark, CDSTT.surface3)))
         pix = self.thumbs.get(it["path"])
         if pix is not None and not pix.isNull():
-            # 裁剪到图片区：任何尺寸误差都不允许盖到下方文件名行
-            p.save()
-            p.setClipRect(img_r)
-            p.drawPixmap(img_r.left() + (img_r.width() - pix.width()) // 2,
-                         img_r.top() + (img_r.height() - pix.height()) // 2, pix)
-            p.restore()
+            pw, ph = pix.width(), pix.height()
+            if pw > 0 and ph > 0:
+                scale = min(img_r.width() / pw, img_r.height() / ph)
+                dw, dh = max(1, int(round(pw * scale))), max(1, int(round(ph * scale)))
+                target = QRect(img_r.left() + (img_r.width() - dw) // 2,
+                               img_r.top() + (img_r.height() - dh) // 2, dw, dh)
+                p.drawPixmap(target, pix)
         else:
-            # —— 骨架屏 + 105° 倾角扫光（CDS cds-skeleton-sweep：2.0s 线性循环）——
-            p.setPen(Qt.NoPen)
-            p.setBrush(_qc(CDST.c(dark, CDSTT.surface3)))
-            p.drawRoundedRect(img_r, CDST.R_LG, CDST.R_LG)
+            # 骨架屏 + 主题色微光扫过
             t = (time.time() % 2.0) / 2.0
             w = img_r.width()
             gx = img_r.left() - w + t * 2.0 * w
             g = QLinearGradient(gx, img_r.top(), gx + w * 0.35, img_r.bottom())
-            sheen = QColor(217, 119, 87, 22) if dark else QColor(198, 97, 63, 14)
+            sheen = QColor(*accent_rgb, 24 if dark else 16)
             g.setColorAt(0.0, QColor(0, 0, 0, 0))
             g.setColorAt(0.35, QColor(0, 0, 0, 0))
             g.setColorAt(0.50, sheen)
             g.setColorAt(0.65, QColor(0, 0, 0, 0))
             g.setColorAt(1.0, QColor(0, 0, 0, 0))
             p.fillRect(img_r, QBrush(g))
-        # 判定语义色（标签行用：淡语义底 + 饱和语义字）
+        p.restore()
+
+        # —— 左上角勾选圆圈（保持 r.left()+8, r.top()+8, 22×22 精确热区）——
+        cr = QRect(r.left() + 8, r.top() + 8, 22, 22)
+        if checked:
+            p.setBrush(_qc(accent_hex))
+            p.setPen(Qt.NoPen)
+            p.drawEllipse(cr)
+            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.text_on_clay)), 2.0))
+            p.drawLine(cr.left() + 6, cr.center().y(), cr.center().x() - 1, cr.bottom() - 7)
+            p.drawLine(cr.center().x() - 1, cr.bottom() - 7, cr.right() - 5, cr.top() + 7)
+        else:
+            p.setBrush(QColor(18, 18, 20, 130 if hovered else 76))
+            p.setPen(QPen(QColor(255, 255, 255, 230 if hovered else 175), 1.4))
+            p.drawEllipse(cr)
+
+        # —— 右上角语义判定悬浮胶囊（广告/疑似/异常）——
         vrole = CDST.ROLE_BY_VERDICT.get(it["verdict"], "info")
-        vc, _vfill, _vedge = CDST.sem(dark, vrole)
-        # 文件名（双向截断：扩展名永远保留）——单独一行
-        name = self._elide_bidir(Path(it["path"]).name, self._fm_name, r.width() - 20)
-        p.setPen(_qc(CDST.c(dark, CDSTT.clay)) if selected
-                 else _qc(CDST.c(dark, CDSTT.text)))
-        p.setFont(self._f_name)
-        p.drawText(QRect(r.left() + 10, r.bottom() - 74, r.width() - 20, 16),
-                   Qt.AlignLeft | Qt.AlignVCenter, name)
-        # 标签行：左判定右格式，同一行、同款底座。
-        # 判定信息重设计：语义色只落在 5px 圆点上，文字走中性灰——
-        # 浅色下不出现任何深色重块，一眼扫色点即知类型（红=广告/琥珀=疑似/蓝=异常）
+        vc, _, vedge = CDST.sem(dark, vrole)
         vtext = VERDICT_TEXT.get(it["verdict"], it["verdict"])
-        tw = self._fm_badge.horizontalAdvance(vtext)
-        vbw = tw + 24                       # 圆点 + 间距 + 文字 + 左右 padding
-        vbr = QRect(r.left() + 10, r.bottom() - 55, vbw, 15)
+        vtw = self._fm_badge.horizontalAdvance(vtext)
+        vbw = vtw + 20
+        vbr = QRect(img_r.right() - vbw - 5, img_r.top() + 5, vbw, 18)
+        p.setPen(QPen(_qc(vedge), 1.0))
+        p.setBrush(QColor(18, 18, 20, 208) if dark else QColor(255, 255, 255, 232))
+        p.drawRoundedRect(vbr, 9, 9)
         p.setPen(Qt.NoPen)
-        p.setBrush(_qc(CDST.c(dark, CDSTT.muted)))
-        p.drawRoundedRect(vbr, CDST.R_SM, CDST.R_SM)
         p.setBrush(QColor(vc))
-        p.drawEllipse(QRect(vbr.left() + 6, vbr.top() + 5, 5, 5))
-        p.setPen(_qc(CDST.c(dark, CDSTT.text_2)))
+        p.drawEllipse(QRect(vbr.left() + 6, vbr.top() + 6, 6, 6))
+        p.setPen(QColor(vc))
         p.setFont(self._f_badge)
-        p.drawText(QRect(vbr.left() + 15, vbr.top(), tw + 4, vbr.height()),
+        p.drawText(QRect(vbr.left() + 14, vbr.top(), vtw + 4, vbr.height()),
                    Qt.AlignLeft | Qt.AlignVCenter, vtext)
+
+        # —— 右下角相似组徽标（图片区内）——
+        gi = self.model.sim_map.get(it["path"])
+        if gi is not None:
+            stxt = f"⟲{len(self.model.sim_groups[gi])}"
+            sw = self._fm_badge.horizontalAdvance(stxt) + 12
+            sr = QRect(img_r.right() - sw - 5, img_r.bottom() - 21, sw, 17)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(15, 15, 17, 175))
+            p.drawRoundedRect(sr, 5, 5)
+            p.setPen(QColor(CDST.c(dark, CDSTT.warn)))
+            p.setFont(self._f_badge)
+            p.drawText(sr, Qt.AlignCenter, stxt)
+
+        # —— 底部文字信息区（按密度自适应）——
+        y0 = img_r.bottom() + 6
         ext = Path(it["path"]).suffix.lstrip(".").upper()
+        ext_w = 0
         if ext:
             btxt = self._fm_badge.elidedText(ext, Qt.ElideRight, 34)
             bw = self._fm_badge.horizontalAdvance(btxt) + 10
-            br = QRect(r.right() - bw - 8, r.bottom() - 55, bw, 15)
+            ext_w = bw + 6
+            br = QRect(r.right() - bw - 8, y0 + 1, bw, 15)
             p.setPen(Qt.NoPen)
             p.setBrush(_qc(CDST.c(dark, CDSTT.muted)))
             p.drawRoundedRect(br, CDST.R_SM, CDST.R_SM)
             p.setPen(_qc(CDST.c(dark, CDSTT.text_3)))
             p.setFont(self._f_badge)
             p.drawText(br, Qt.AlignCenter, btxt)
-        # 命中原因：中性灰（不再整屏红字；语义色只保留在判定标签上）
-        reason = self._fm_reason.elidedText("; ".join(h.get("label", "") for h in it["reasons"]),
-                                            Qt.ElideRight, r.width() - 20)
-        p.setPen(_qc(CDST.c(dark, CDSTT.text_2)))
-        p.setFont(self._f_reason)
-        p.drawText(QRect(r.left() + 10, r.bottom() - 37, r.width() - 20, 13),
-                   Qt.AlignLeft | Qt.AlignVCenter, reason)
-        # 来源文件夹行（📁 根文件夹名/子目录）
+
+        name_w = max(40, r.width() - 18 - ext_w)
+        name = self._elide_bidir(Path(it["path"]).name, self._fm_name, name_w)
+        p.setPen(_qc(accent_hex) if (checked or selected) else _qc(CDST.c(dark, CDSTT.text)))
+        p.setFont(self._f_name)
+        p.drawText(QRect(r.left() + 9, y0, name_w, 17), Qt.AlignLeft | Qt.AlignVCenter, name)
+
+        if self._dspec["show_reason"]:
+            reason = self._fm_reason.elidedText(
+                "; ".join(h.get("label", "") for h in it["reasons"]),
+                Qt.ElideRight, r.width() - 18)
+            p.setPen(_qc(CDST.c(dark, CDSTT.text_2)))
+            p.setFont(self._f_reason)
+            p.drawText(QRect(r.left() + 9, y0 + 21, r.width() - 18, 15),
+                       Qt.AlignLeft | Qt.AlignVCenter, reason)
+            folder_y = y0 + 40
+        else:
+            folder_y = y0 + 20
+
         folder = it.get("_folder") or ""
         if folder:
-            ftext = self._fm_reason.elidedText(folder, Qt.ElideMiddle, r.width() - 34)
-            p.setPen(_qc(CDST.c(dark, CDSTT.text_2)))
-            p.setFont(self._f_reason)
-            # 自绘文件夹小图标（不用 emoji——部分字体缺字形会显示成方块）
+            ftext = self._fm_reason.elidedText(folder, Qt.ElideMiddle, r.width() - 32)
             p.setPen(Qt.NoPen)
             p.setBrush(_qc(CDST.c(dark, CDSTT.text_3)))
-            p.drawRoundedRect(QRect(r.left() + 10, r.bottom() - 18, 11, 8), 2, 2)
-            p.drawRoundedRect(QRect(r.left() + 10, r.bottom() - 21, 5, 3), 1, 1)
-            p.setPen(_qc(CDST.c(dark, CDSTT.text_2)))
-            p.drawText(QRect(r.left() + 25, r.bottom() - 21, r.width() - 35, 14),
-                       Qt.AlignLeft | Qt.AlignVCenter, ftext)
-        cr = QRect(r.left() + 8, r.top() + 8, 22, 22)
-        checked = it["path"] in self.model.checked
-        if checked:
-            p.setBrush(_qc(CDST.c(dark, CDSTT.clay)))
-            p.setPen(Qt.NoPen)
-            p.drawEllipse(cr)
-            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.text_on_clay)), 2))
-            p.drawLine(cr.left() + 6, cr.center().y(), cr.center().x() - 1, cr.bottom() - 7)
-            p.drawLine(cr.center().x() - 1, cr.bottom() - 7, cr.right() - 5, cr.top() + 7)
-        else:
-            p.setBrush(_qc(CDST.c(dark, CDSTT.surface2)))
-            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.text_2)), 1.2))
-            p.drawEllipse(cr)
-        gi = self.model.sim_map.get(it["path"])
-        if gi is not None:
-            # 相似组用琥珀（warn）——与判定的 clay/红区分开，形成色彩层次
-            p.setPen(QPen(_qc(CDST.c(dark, CDSTT.warn))))
+            p.drawRoundedRect(QRect(r.left() + 9, folder_y + 4, 10, 7), 2, 2)
+            p.drawRoundedRect(QRect(r.left() + 9, folder_y + 2, 5, 2), 1, 1)
+            p.setPen(_qc(CDST.c(dark, CDSTT.text_3)))
             p.setFont(self._f_reason)
-            p.drawText(QRect(r.right() - 48, r.top() + 6, 40, 16),
-                       Qt.AlignRight | Qt.AlignVCenter, f"⟲{len(self.model.sim_groups[gi])}")
+            p.drawText(QRect(r.left() + 23, folder_y, r.width() - 32, 15),
+                       Qt.AlignLeft | Qt.AlignVCenter, ftext)
         p.restore()
 
     def sizeHint(self, opt, idx):
-        return QSize(CARD_W, CARD_H)
+        return QSize(self._dspec["card_w"], self._dspec["card_h"])
 
 
 # ================================================================ 文件夹条
@@ -471,10 +492,10 @@ class FolderBar(QWidget):
         super().__init__(parent)
         self.app = app
         self.setObjectName("folderBar")
-        self.setFixedHeight(50)
+        self.setFixedHeight(38)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(14, 6, 14, 6)
-        lay.setSpacing(8)
+        lay.setContentsMargins(16, 4, 16, 4)
+        lay.setSpacing(6)
         self._chips: dict[str, QLabel] = {}
         from PySide6.QtWidgets import QScrollArea
         self._scroll = QScrollArea(self)
@@ -492,7 +513,7 @@ class FolderBar(QWidget):
         self._scroll.setWidget(self._chip_host)
         lay.addWidget(self._scroll, 1)
         self.btn_more = PushButton('更多文件夹', self)
-        self.btn_more.setFixedSize(92, 32)
+        self.btn_more.setFixedSize(88, 28)
         self.btn_more.clicked.connect(self.open_more)
         self.btn_more.hide()
         lay.addWidget(self.btn_more)
@@ -1266,26 +1287,20 @@ class Segmented(QWidget):
         self._position_indicator(animate=False)
 
     def _apply_style(self):
-        if isDarkTheme():
-            self.setStyleSheet("""
-                Segmented { background: rgba(255,255,255,0.08); border-radius: 15px; }
-                Segmented QPushButton { background: transparent; border: none; color: #a3a3a3;
-                    font-size: 12px; padding: 0 10px; }
-                Segmented QPushButton[active="true"] { color: #f5f5f5; }
-                #segIndicator { background: #2c2c2a; border-radius: 13px;
-                    border: 1px solid rgba(255,255,255,0.10); }
-            """)
-        else:
-            # 浅色：滑块纯白 + 6% 黑轨道对比不足（用户反馈"没考虑白色主题"），
-            # 轨道与滑块描边同步加深，选中态一眼可辨
-            self.setStyleSheet("""
-                Segmented { background: rgba(0,0,0,0.10); border-radius: 15px; }
-                Segmented QPushButton { background: transparent; border: none; color: #6b6863;
-                    font-size: 12px; padding: 0 10px; }
-                Segmented QPushButton[active="true"] { color: #151515; font-weight: 600; }
-                #segIndicator { background: #ffffff; border-radius: 13px;
-                    border: 1px solid rgba(0,0,0,0.14); }
-            """)
+        d = isDarkTheme()
+        track = CDST.c(d, CDSTT.seg_track)
+        pill = CDST.c(d, CDSTT.seg_pill)
+        border = CDST.c(d, CDSTT.border)
+        txt = CDST.c(d, CDSTT.text)
+        txt2 = CDST.c(d, CDSTT.text_2)
+        self.setStyleSheet(f"""
+            Segmented {{ background: {track}; border-radius: 15px; }}
+            Segmented QPushButton {{ background: transparent; border: none; color: {txt2};
+                font-size: 12px; padding: 0 10px; }}
+            Segmented QPushButton[active="true"] {{ color: {txt}; font-weight: 600; }}
+            #segIndicator {{ background: {pill}; border-radius: 13px;
+                border: 1px solid {border}; }}
+        """)
 
     def set_index(self, i, animate=True):
         if i == self._index:
@@ -1329,17 +1344,14 @@ class Segmented(QWidget):
             self._slide.start()
         else:
             self._indicator.setGeometry(int(x), 2, int(w), self.height() - 4)
-        # 按钮文字态
-        if isDarkTheme():
-            qss_a = ("QPushButton { background: transparent; border: none; color: #f5f5f5;"
-                     " font-size: 12px; font-weight: 600; padding: 0 10px; font-family: 'Microsoft YaHei UI'; }")
-            qss_n = ("QPushButton { background: transparent; border: none; color: #a3a3a3;"
-                     " font-size: 12px; padding: 0 10px; font-family: 'Microsoft YaHei UI'; }")
-        else:
-            qss_a = ("QPushButton { background: transparent; border: none; color: #151515;"
-                     " font-size: 12px; font-weight: 600; padding: 0 10px; font-family: 'Microsoft YaHei UI'; }")
-            qss_n = ("QPushButton { background: transparent; border: none; color: #525252;"
-                     " font-size: 12px; padding: 0 10px; font-family: 'Microsoft YaHei UI'; }")
+        # 按钮文字态（全部由当前主题色盘派生）
+        d = isDarkTheme()
+        fg_a = CDST.c(d, CDSTT.text)
+        fg_n = CDST.c(d, CDSTT.text_2)
+        qss_a = (f"QPushButton {{ background: transparent; border: none; color: {fg_a};"
+                 f" font-size: 12px; font-weight: 600; padding: 0 10px; font-family: 'Microsoft YaHei UI'; }}")
+        qss_n = (f"QPushButton {{ background: transparent; border: none; color: {fg_n};"
+                 f" font-size: 12px; padding: 0 10px; font-family: 'Microsoft YaHei UI'; }}")
         for i, b in enumerate(self._btns):
             b.setProperty("active", i == self._index)
             b.setStyleSheet(qss_a if i == self._index else qss_n)
@@ -1495,7 +1507,11 @@ class App(FramelessWindow):
         self._command_shortcut.activated.connect(self.open_palette)
         self.cfg = cfg
         self.theme = cfg.get("ui_theme", "light")
-        setThemeColor(CDST.BRAND)
+        self.palette_name = CDST.set_palette(cfg.get("ui_palette", CDST.DEFAULT_PALETTE))
+        self.density = cfg.get("ui_density", CDST.DEFAULT_DENSITY)
+        if self.density not in CDST.DENSITIES:
+            self.density = CDST.DEFAULT_DENSITY
+        setThemeColor(CDST.c(self.theme == "dark", CDSTT.clay))
         setTheme(Theme.DARK if self.theme == "dark" else Theme.LIGHT)
         scr = self.screen().availableGeometry() if self.screen() else None
         self.resize(min(1500, scr.width() - 80) if scr else 1460,
@@ -1579,9 +1595,9 @@ class App(FramelessWindow):
 
     # ---------- 主题 ----------
     def _apply_theme(self):
-        """令牌驱动的主题 QSS。色彩分层原则：
-        品牌橙只出现在「主动作 / 当前项 / 进度」；判定与状态一律走语义色；其余全用暖灰阶梯。"""
+        """统一主题引擎驱动的 QSS：全部表面、边界与强调色均由当前激活色盘动态生成。"""
         d = self.theme == 'dark'
+        setThemeColor(CDST.c(d, CDSTT.clay))
         TT = CDSTT
         root_bg = CDST.c(d, TT.root_bg)
         s0 = CDST.c(d, TT.surface0)
@@ -1596,18 +1612,15 @@ class App(FramelessWindow):
         clay_fill = CDST.c(d, TT.clay_fill)
         clay_edge = CDST.c(d, TT.border_clay)
         ok_fg, ok_fill, _ = CDST.sem(d, "ok")
-        # 滚动条走暖灰（不再用品牌橙满屏刷存在感）
         sb = "rgba(20,20,20,0.22)" if not d else "rgba(255,255,255,0.20)"
         sb_h = "rgba(20,20,20,0.38)" if not d else "rgba(255,255,255,0.34)"
 
         self.setStyleSheet(f"""
             #mainWindow {{ background: {root_bg}; }}
-            /* 整窗统一底色（Claude 原则：靠留白与发丝分层，不做盒子套盒子）。
-               顶/底/筛选/文件夹条全部透出根底色，只留一条极淡发丝。 */
-            #topBar {{ background: {s0}; border-bottom: none; }}
+            #topBar {{ background: {s0}; border-bottom: 1px solid {bdr_soft}; }}
             #bottomBar {{ background: {s0}; border-top: 1px solid {bdr}; }}
-            #footerBar {{ background: {root_bg}; }}
-            #filterBar {{ background: transparent; border: none; }}
+            #footerBar {{ background: {CDST.c(d, TT.surface3)}; border-top: 1px solid {bdr_soft}; }}
+            #filterBar {{ background: {CDST.c(d, TT.surface3)}; border-bottom: 1px solid {bdr}; }}
             #detailPanel {{ background: {s0}; border-left: 1px solid {bdr}; }}
             #sectionTitle {{ color: {txt}; font-size: 20px; font-weight: 600; }}
             #detailFilename {{ color: {txt}; font-size: 13px; font-weight: 600; }}
@@ -1617,11 +1630,9 @@ class App(FramelessWindow):
             #detailHead {{ background: transparent; border-bottom: 1px solid {bdr_soft}; }}
             #gridWrap {{ background: transparent; }}
             #folderBar {{ background: {s0}; border-bottom: 1px solid {bdr}; }}
-            /* 预览画布：图片需要边界，保留 surface2 + 发丝 + 圆角 12 */
             #previewCanvas {{ background: {s2}; border: 1px solid {bdr};
                 border-radius: {CDST.R_CARD}px; color: {txt3}; }}
             #vsep {{ background: {bdr_soft}; }}
-            /* 文件夹 chip：淡底无边框（hover 才浮出），完成=绿字 */
             #folderChip {{ background: {hov}; border: 1px solid transparent; border-radius: {CDST.R_MD}px; }}
             #folderChip QLabel {{ background: transparent; color: {txt2}; font-size: 12px; }}
             #folderChip QToolButton {{
@@ -1635,11 +1646,11 @@ class App(FramelessWindow):
             #folderChip[active="true"] QLabel {{ color: {clay}; }}
             #folderHint {{ color: {txt3}; font-size: 12px; }}
             #currentFile {{ color: {txt2}; font-size: 12px; }}
-            QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
-            QScrollBar::handle:vertical {{ background: {sb}; border-radius: 5px; min-height: 40px; }}
+            QScrollBar:vertical {{ background: transparent; width: 9px; margin: 0; }}
+            QScrollBar::handle:vertical {{ background: {sb}; border-radius: 4px; min-height: 40px; }}
             QScrollBar::handle:vertical:hover {{ background: {sb_h}; }}
-            QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0; }}
-            QScrollBar::handle:horizontal {{ background: {sb}; border-radius: 5px; min-width: 40px; }}
+            QScrollBar:horizontal {{ background: transparent; height: 9px; margin: 0; }}
+            QScrollBar::handle:horizontal {{ background: {sb}; border-radius: 4px; min-width: 40px; }}
             QScrollBar::handle:horizontal:hover {{ background: {sb_h}; }}
             QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
             QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
@@ -1647,23 +1658,61 @@ class App(FramelessWindow):
         self._apply_brand_style()
         self._apply_info_bg()
         if getattr(self, "delegate", None) is not None:
-            self.delegate.dark = d          # 卡片绘制主题：与界面同源推送
+            self.delegate.dark = d
         if hasattr(self, "log"):
             self._apply_log_bg()
         if hasattr(self, "seg_disposal"):
-            self.seg_disposal.refresh_theme()   # 分段胶囊轨道/滑块/文字随主题重建
+            self.seg_disposal.refresh_theme()
+        if hasattr(self, "verdict_tabs"):
+            self.verdict_tabs.refresh_theme()
+        if hasattr(self, "density_tabs"):
+            self.density_tabs.refresh_theme()
         if hasattr(self, "lm"):
-            # 侧栏/导航项自绘样式：主题切换必须重刷（缺失时侧栏停留在旧主题色，
-            # 用户报"左侧导航区域不随主题换色"的根因）
             self.lm.refresh_theme(d)
         if hasattr(self, "_empty"):
-            # 空状态图标底同理（用户报浅色下残留黑色方块 = 深色 muted 底未重刷）
             self._empty.refresh_theme(d)
-        self._apply_selection_palette()   # 框选色随主题（品牌橙半透明）
+        self._dispose_css = None
+        self._apply_selection_palette()
         if hasattr(self, "status_pill"):
-            # 控件自定义样式按「当前主题」生成（setCustomStyleSheet 双套参数在部分
-            # 组件上不重放——见踩坑记录），所以主题切换必须整体重刷一次
             self._apply_styles()
+
+    def set_palette(self, palette_id: str, *, save: bool = True):
+        """切换主题色盘（宣纸暖陶 2.0 / 石墨画廊 / 翠影青瓷 / 极夜暗房）。"""
+        key = CDST.set_palette(palette_id)
+        self.palette_name = key
+        self.cfg["ui_palette"] = key
+        if save:
+            af.save_config(self.cfg)
+        self._apply_theme()
+        palette = getattr(self, "_palette", None)
+        if palette is not None:
+            try:
+                if palette.isVisible():
+                    palette.refresh_theme(self.theme == "dark")
+            except RuntimeError:
+                self._palette = None
+        if hasattr(self, "grid"):
+            self.grid.viewport().update()
+            self.grid.doItemsLayout()
+        return self
+
+    def set_density(self, density_id: str, *, save: bool = True):
+        """切换卡片网格密度（紧凑 / 标准 / 大图）。"""
+        key = density_id if density_id in CDST.DENSITIES else CDST.DEFAULT_DENSITY
+        self.density = key
+        self.cfg["ui_density"] = key
+        if save:
+            af.save_config(self.cfg)
+        spec = CDST.density_spec(key)
+        if hasattr(self, "delegate"):
+            self.delegate.set_density(key)
+        if hasattr(self, "grid"):
+            self.grid.setGridSize(QSize(spec["grid_w"], spec["grid_h"]))
+            self.grid.doItemsLayout()
+            self.grid.viewport().update()
+        if hasattr(self, "density_tabs"):
+            self.density_tabs.set_density(key)
+        return self
 
     def _apply_brand_style(self):
         # 品牌在 TitleBar 内置（双色字 + 主题同步）
@@ -1852,8 +1901,13 @@ class App(FramelessWindow):
                   self.btn_rules, self.btn_cfg, self.btn_history, self.btn_export,
                   self.btn_theme, self.btn_palette, self.btn_prev, self.btn_next,
                   self.btn_all, self.btn_invert, self.btn_clear, self.btn_similar,
-                  self.btn_about, self.btn_more_actions, self.btn_reset_filters, self.btn_selected):
+                  self.btn_about, self.btn_more_actions, self.btn_reset_filters):
             setCustomStyleSheet(w, trans, trans)
+        sel_btn_css = (f"""TransparentPushButton {{ background: transparent; border: none;
+            border-radius: {CDST.R_MD}px; padding: 1px 8px; color: {clay}; font-size: 12px; }}
+            TransparentPushButton:hover {{ background: {CDST.c(d, TT.clay_fill)}; color: {clay}; }}
+            TransparentPushButton:checked {{ background: {CDST.c(d, TT.clay_fill)}; color: {clay}; font-weight: 600; }}""")
+        setCustomStyleSheet(self.btn_selected, sel_btn_css, sel_btn_css)
         mk = outline(dang_fg, dang_fill, dang_edge)
         kp = outline(ok_fg, ok_fill, ok_edge)
         setCustomStyleSheet(self.btn_mark, mk, mk)
@@ -2209,6 +2263,13 @@ class App(FramelessWindow):
             ("隔离区管理…", self.restore_ui),
             ("导出 CSV 报告", self.export_report),
             ("切换浅色 / 深色", self.toggle_theme),
+            ("主题：宣纸暖陶 2.0", lambda: self.set_palette("atelier")),
+            ("主题：石墨画廊", lambda: self.set_palette("slate")),
+            ("主题：翠影青瓷", lambda: self.set_palette("sage")),
+            ("主题：极夜暗房", lambda: self.set_palette("obsidian")),
+            ("卡片密度：紧凑", lambda: self.set_density("compact")),
+            ("卡片密度：标准", lambda: self.set_density("standard")),
+            ("卡片密度：大图", lambda: self.set_density("large")),
             ("关于广告图过滤", self.open_about),
         ]
         from cds_widgets import CDSCommandPalette
@@ -2849,20 +2910,20 @@ class App(FramelessWindow):
         n_hit = len(self.model.items)
         d = isDarkTheme()
         self.pill_hit.setText(f"待审 {n_hit}")
-        self.pill_hit.setFixedHeight(26)
+        self.pill_hit.setFixedHeight(22)
         self.pill_hit.setAlignment(Qt.AlignCenter)
         self.pill_hit.setStyleSheet(
-            f"#countPill {{ {CDST.pill_qss(d, 'gray')} }}")
+            f"#countPill {{ {CDST.pill_qss(d, 'gray', radius=11, pad='1px 9px')} }}")
         picked = [it for it in self.items if it['path'] in self.checked] if self.checked else []
         n_sel = len(picked) if self.items else len(self.checked)
         size = sum((self._stat(it['path']) or (0, 0))[0] for it in picked) / 1048576
         visible = sum(it['path'] in self.checked for it in self.model.items) if self.checked else 0
         self.pill_sel.setText(f"已选 {n_sel} 张 · {size:.1f} MB")
-        self.pill_sel.setFixedHeight(26)
+        self.pill_sel.setFixedHeight(24)
         self.pill_sel.setAlignment(Qt.AlignCenter)
         role = "clay" if n_sel else "gray"
         self.pill_sel.setStyleSheet(
-            f"#countPill {{ {CDST.pill_qss(d, role)} }}")
+            f"#countPill {{ {CDST.pill_qss(d, role, radius=12, pad='2px 10px')} }}")
         self.pill_sel.setVisible(True)
         self.lbl_count.setToolTip(f"全部待审 {len(self.items)} · 当前显示 {n_hit} · 全局已选 {n_sel} · 可见已选 {visible}")
         if hasattr(self, 'selection_scope'):
@@ -2892,7 +2953,8 @@ class App(FramelessWindow):
             verb = {'quarantine': '隔离', 'recycle': '移入回收站', 'delete': '永久删除'}[mode]
             self.btn_dispose.setText(f'{verb} {n_sel} 张')
             fg = CDST.c(d, CDSTT.danger if mode == 'delete' else CDSTT.clay)
-            css = (f'PrimaryPushButton {{ background:{fg}; color:#ffffff; border:none;'
+            fg_text = '#ffffff' if mode == 'delete' else CDST.c(d, CDSTT.text_on_clay)
+            css = (f'PrimaryPushButton {{ background:{fg}; color:{fg_text}; border:none;'
                    f' border-radius:8px; padding:6px 14px; }}'
                    f'PrimaryPushButton:disabled {{ background:{CDST.c(d, CDSTT.muted)};'
                    f' color:{CDST.c(d, CDSTT.text_3)}; }}')
@@ -3049,19 +3111,19 @@ class App(FramelessWindow):
         super().keyPressEvent(e)
 
     def _apply_selection_palette(self):
-        """选中相关配色：①原生 item 选中底走 QPalette.Highlight（品牌橙，替代深蓝）；
-        ②框选矩形是自绘 overlay（原生绘制不认 palette），此处同步刷新它的样式。"""
+        """选中与框选配色：由当前激活主题色盘动态派生。"""
         if not hasattr(self, "grid"):
             return
         dark = isDarkTheme()
+        r, g, b = CDST.accent_rgb(dark)
         pal = self.grid.palette()
-        pal.setColor(QPalette.Highlight, QColor(217, 119, 87, 56 if not dark else 64))
+        pal.setColor(QPalette.Highlight, QColor(r, g, b, 56 if not dark else 68))
         pal.setColor(QPalette.HighlightedText, _qc(CDST.c(dark, CDSTT.text)))
         self.grid.setPalette(pal)
         band = getattr(self, "_sel_band", None)
         if band is not None:
-            fill = "rgba(217,119,87,0.10)" if not dark else "rgba(217,119,87,0.14)"
-            edge = "rgba(198,97,63,0.55)" if not dark else "rgba(224,130,100,0.60)"
+            fill = f"rgba({r},{g},{b},{0.10 if not dark else 0.16})"
+            edge = f"rgba({r},{g},{b},{0.58 if not dark else 0.65})"
             band.setStyleSheet(
                 f"#selBand {{ background: {fill};"
                 f" border: 1.5px solid {edge}; border-radius: 6px; }}")
@@ -3567,8 +3629,45 @@ class ConfigDialog(WorkbenchDialog):
         backup.addStretch()
         storage_layout.addLayout(backup)
         storage_layout.addStretch()
+
+        appearance, appearance_layout = section('外观与主题', '自定义主题色盘、明暗外观与卡片网格密度，保存后立即生效。', self)
+        prow = QHBoxLayout()
+        prow.addWidget(CaptionLabel('主题色盘', self))
+        self.cb_palette = ComboBox(self)
+        self._palette_keys = list(CDST.PALETTE_ORDER)
+        for key in self._palette_keys:
+            spec = CDST.PALETTES[key]
+            self.cb_palette.addItem(f"{spec['name']}（{spec['desc']}）")
+        cur_pal = cfg.get('ui_palette', CDST.DEFAULT_PALETTE)
+        self.cb_palette.setCurrentIndex(self._palette_keys.index(cur_pal) if cur_pal in self._palette_keys else 0)
+        prow.addWidget(self.cb_palette, 1)
+        appearance_layout.addLayout(prow)
+
+        trow = QHBoxLayout()
+        trow.addWidget(CaptionLabel('明暗外观', self))
+        self.cb_theme = ComboBox(self)
+        self.cb_theme.addItems(['浅色模式', '深色模式'])
+        self.cb_theme.setCurrentIndex(1 if cfg.get('ui_theme', 'light') == 'dark' else 0)
+        trow.addWidget(self.cb_theme)
+        trow.addStretch(1)
+        appearance_layout.addLayout(trow)
+
+        drow = QHBoxLayout()
+        drow.addWidget(CaptionLabel('卡片密度', self))
+        self.cb_density = ComboBox(self)
+        self._density_keys = list(CDST.DENSITY_ORDER)
+        for key in self._density_keys:
+            spec = CDST.DENSITIES[key]
+            self.cb_density.addItem(f"{spec['label']}（{spec['card_w']}×{spec['card_h']}）")
+        cur_dens = cfg.get('ui_density', CDST.DEFAULT_DENSITY)
+        self.cb_density.setCurrentIndex(self._density_keys.index(cur_dens) if cur_dens in self._density_keys else 0)
+        drow.addWidget(self.cb_density)
+        drow.addStretch(1)
+        appearance_layout.addLayout(drow)
+        appearance_layout.addStretch()
+
         self.viewLayout.addWidget(navigation(self, [
-            ('扫描目录', folders), ('识别选项', recognition), ('隔离与配置', storage)]), 1)
+            ('扫描目录', folders), ('识别选项', recognition), ('隔离与配置', storage), ('外观与主题', appearance)]), 1)
 
         self.yesButton.setText("保存")
         self.cancelButton.setText("关闭")
@@ -3587,6 +3686,11 @@ class ConfigDialog(WorkbenchDialog):
         self.ocr_scope.setCurrentIndex(int(bool(cfg['ocr']['full_image_if_nothing'])))
         self.cb_workers.setCurrentIndex(max(0, min(15, int(cfg['workers']) - 1)))
         self.quarantine_path.setText(cfg.get('quarantine_dir', ''))
+        cur_pal = cfg.get('ui_palette', CDST.DEFAULT_PALETTE)
+        self.cb_palette.setCurrentIndex(self._palette_keys.index(cur_pal) if cur_pal in self._palette_keys else 0)
+        self.cb_theme.setCurrentIndex(1 if cfg.get('ui_theme', 'light') == 'dark' else 0)
+        cur_dens = cfg.get('ui_density', CDST.DEFAULT_DENSITY)
+        self.cb_density.setCurrentIndex(self._density_keys.index(cur_dens) if cur_dens in self._density_keys else 0)
 
     def _form_config(self):
         data = copy.deepcopy(self.cfg)
@@ -3598,6 +3702,9 @@ class ConfigDialog(WorkbenchDialog):
         data['phash'].update(enabled=self.cb_sim.isChecked(), threshold=self.sim_threshold.value())
         data['workers'] = self.cb_workers.currentIndex() + 1
         data['quarantine_dir'] = self.quarantine_path.text().strip()
+        data['ui_palette'] = self._palette_keys[max(0, self.cb_palette.currentIndex())]
+        data['ui_theme'] = 'dark' if self.cb_theme.currentIndex() == 1 else 'light'
+        data['ui_density'] = self._density_keys[max(0, self.cb_density.currentIndex())]
         return data
 
     def _choose_quarantine(self):
@@ -3696,7 +3803,8 @@ class ConfigDialog(WorkbenchDialog):
         if new_theme in ("light", "dark") and new_theme != self.app.theme:
             setTheme(Theme.DARK if new_theme == "dark" else Theme.LIGHT)
             self.app.theme = new_theme
-            self.app._apply_theme()
+        self.app.set_palette(merged.get("ui_palette", CDST.DEFAULT_PALETTE), save=False)
+        self.app.set_density(merged.get("ui_density", CDST.DEFAULT_DENSITY), save=False)
         InfoBar.success(title="已导入", content="配置和当前设置控件已同步更新",
                         orient=Qt.Horizontal, isClosable=True,
                         position=InfoBarPosition.TOP, duration=3000, parent=self)
@@ -3719,6 +3827,12 @@ class ConfigDialog(WorkbenchDialog):
         self.cfg.clear()
         self.cfg.update(data)
         af.save_config(self.cfg)
+        new_theme = data.get("ui_theme")
+        if new_theme in ("light", "dark") and new_theme != self.app.theme:
+            setTheme(Theme.DARK if new_theme == "dark" else Theme.LIGHT)
+            self.app.theme = new_theme
+        self.app.set_palette(data.get("ui_palette", CDST.DEFAULT_PALETTE), save=False)
+        self.app.set_density(data.get("ui_density", CDST.DEFAULT_DENSITY), save=False)
         if hasattr(self.app, "folder_bar"):
             self.app.folder_bar.rebuild()
             self.app.refresh()
@@ -4243,9 +4357,10 @@ def app_icon_pixmap(size: int = 64) -> "QPixmap":
 def run_gui(return_app=False):
     qapp = QApplication.instance() or QApplication(sys.argv)
     qapp.setApplicationVersion(af.APP_VERSION)
-    setThemeColor("#c6613f")   # CDS 官方主品牌色（陶土橙深阶）
-    qapp.setWindowIcon(QIcon(app_icon_pixmap(256)))   # 任务栏/系统显示的窗口图标
     cfg = af.load_config()
+    CDST.set_palette(cfg.get("ui_palette", CDST.DEFAULT_PALETTE))
+    setThemeColor(CDST.c(cfg.get("ui_theme") == "dark", CDSTT.clay))
+    qapp.setWindowIcon(QIcon(app_icon_pixmap(256)))   # 任务栏/系统显示的窗口图标
     app = App(cfg)
     app._cache = af.Cache(af.CACHE_PATH)
     app._cache.check_config_version(cfg)
@@ -4911,7 +5026,8 @@ def gui_func_test() -> int:
         # 框选矩形自绘：原生绘制不认 palette（windows11 style 画深色块）
         check("框选矩形为自绘 overlay", app._sel_band is not None
               and not app.grid.isSelectionRectVisible())
-        check("框选 overlay 配色为品牌橙", "217,119,87" in app._sel_band.styleSheet(),
+        ar, ag, ab = CDST.accent_rgb(isDarkTheme())
+        check("框选 overlay 配色与当前主题一致", f"{ar},{ag},{ab}" in app._sel_band.styleSheet(),
               app._sel_band.styleSheet()[:50])
         # 锁死"QColor 不能直接吃 rgba 浮点 alpha"这个坑（曾致选中卡整卡被刷黑）
         parsed_color = _qc("rgba(217,119,87,0.06)")

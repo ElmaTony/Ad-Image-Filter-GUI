@@ -94,6 +94,8 @@ DEFAULT_CONFIG = {
     "quarantine_dir": "",
     "quarantine_locations": [],
     "phash": {"enabled": True, "threshold": 6},
+    "ui_palette": "atelier",
+    "ui_density": "compact",
 }
 
 
@@ -168,6 +170,12 @@ def normalize_config(user: dict) -> dict:
     if not isinstance(locations, list) or not all(
             isinstance(p, str) and '\x00' not in p and Path(p).is_absolute() for p in locations):
         raise ValueError('隔离区历史目录须为完整路径列表')
+    if cfg.get('ui_palette', 'atelier') not in ('atelier', 'slate', 'sage', 'obsidian'):
+        raise ValueError('主题色盘无效')
+    if cfg.get('ui_density', 'compact') not in ('compact', 'standard', 'large'):
+        raise ValueError('卡片密度无效')
+    if 'ui_theme' in cfg and cfg['ui_theme'] not in ('light', 'dark'):
+        raise ValueError('主题明暗模式无效')
     return cfg
 
 

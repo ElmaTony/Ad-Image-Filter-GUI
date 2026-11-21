@@ -123,22 +123,23 @@ def style_dialog(dialog):
     c = lambda token: T.c(dark, token)
     surface, panel, text, muted, border = [c(x) for x in
         (T.T.surface0, T.T.surface1, T.T.text, T.T.text_2, T.T.border)]
+    accent = c(T.T.clay)
     dialog.setStyleSheet(
         f'QDialog#dialogWindow {{ background:{surface}; border:1px solid {border}; border-radius:16px; }}'
         f'QLabel {{ color:{text}; font-family:"Microsoft YaHei UI"; background:transparent; }}'
         f'QLabel#mutedText {{ color:{muted}; font-size:12px; }}'
         f'QLabel#sectionTitle {{ font-size:14px; font-weight:600; }}'
-        f'QLabel#dialogTitle {{ font-size:22px; font-weight:600; }}'
+        f'QLabel#dialogTitle {{ font-size:20px; font-weight:600; }}'
         f'QFrame#settingsSection {{ background:{panel}; border:1px solid {border}; border-radius:12px; }}'
         f'QFrame#dialogHeader {{ border-bottom:1px solid {border}; }}'
         f'QFrame#dialogFooter {{ background:{panel}; border-top:1px solid {border}; border-bottom-left-radius:16px; border-bottom-right-radius:16px; }}'
         f'QListWidget#dialogNavigation {{ background:{panel}; border:none; border-radius:10px; padding:6px; color:{text}; outline:none; }}'
-        f'QListWidget#dialogNavigation::item {{ padding:12px 10px; border-radius:7px; margin:2px 0; }}'
-        f'QListWidget#dialogNavigation::item:selected {{ background:{c(T.T.clay_fill)}; color:{T.CLAY}; }}'
+        f'QListWidget#dialogNavigation::item {{ padding:11px 10px; border-radius:7px; margin:2px 0; }}'
+        f'QListWidget#dialogNavigation::item:selected {{ background:{c(T.T.clay_fill)}; color:{accent}; font-weight:600; }}'
         f'QPushButton#dialogClose {{ background:transparent; border:none; border-radius:8px; color:{muted}; font-size:20px; }}'
         f'QPushButton#dialogClose:hover {{ background:{c(T.T.surface3)}; color:{text}; }}'
-        f'QLineEdit {{ background:{c(T.T.surface2)}; color:{text}; border:1px solid {border}; border-radius:7px; padding:7px 10px; selection-background-color:{T.BRAND}; }}'
-        f'QLineEdit:focus {{ border-color:{T.BRAND}; }}'
+        f'QLineEdit {{ background:{c(T.T.surface2)}; color:{text}; border:1px solid {border}; border-radius:7px; padding:7px 10px; selection-background-color:{accent}; }}'
+        f'QLineEdit:focus {{ border-color:{accent}; }}'
         f'QSpinBox {{ background:{c(T.T.surface2)}; color:{text}; border:1px solid {border}; border-radius:6px; padding:5px; }}'
         f'QScrollArea, QScrollArea > QWidget > QWidget {{ background:{surface}; border:none; }}'
     )
