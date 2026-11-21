@@ -67,6 +67,53 @@ class UpdateCheckTests(unittest.TestCase):
             with self.assertRaisesRegex(updates.UpdateCheckError, '有访问权限'):
                 updates.check_latest('1.4.0')
 
+    def test_env_token_rate_limit_null_assets_and_invalid_local_version(self):
+        payload = release('v1.5.0')
+        with patch.dict(os.environ, {updates.TOKEN_ENV: 'env-token'}), \
+                patch.object(updates, '_request_latest', return_value=payload) as request:
+            result = updates.check_latest('1.4.0')
+        self.assertEqual(result.version, 'v1.5.0')
+        request.assert_called_once_with('env-token')
+
+        with patch.dict(os.environ, {updates.TOKEN_ENV: 'bad\ntoken'}):
+            with self.assertRaisesRegex(updates.UpdateCheckError, '无效字符'):
+                updates.check_latest('1.4.0')
+
+        rate_limited = HTTPError(updates.LATEST_API, 429, 'Too Many Requests', None, None)
+        with patch.dict(os.environ, {updates.TOKEN_ENV: ''}), \
+                patch.object(updates, '_git_token', return_value=None), \
+                patch.object(updates, '_request_latest', side_effect=rate_limited):
+            with self.assertRaisesRegex(updates.UpdateCheckError, '频繁'):
+                updates.check_latest('1.4.0')
+
+        with patch.object(updates, '_latest_metadata', return_value={**release('v1.5.0'), 'assets': None}):
+            result = updates.check_latest('1.4.0')
+        self.assertIsNone(result.download_url)
+        self.assertEqual(result.release_url, f'{updates.RELEASES_URL}/tag/v1.5.0')
+
+        with patch.object(updates, '_latest_metadata', return_value=['not-a-dict']):
+            with self.assertRaisesRegex(updates.UpdateCheckError, '版本信息'):
+                updates.check_latest('1.4.0')
+
+        with self.assertRaisesRegex(updates.UpdateCheckError, '当前软件版本号'):
+            updates.check_latest('not-a-version')
+
+    def test_no_redirect_and_response_size_limit(self):
+        handler = updates._NoRedirect()
+        self.assertIsNone(handler.redirect_request(None, None, 302, 'Found', {}, 'https://evil.example'))
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self, n): return b'x' * n
+
+        class FakeOpener:
+            def open(self, req, timeout=8): return FakeResponse()
+
+        with patch.object(updates, 'build_opener', return_value=FakeOpener()):
+            with self.assertRaises(ValueError):
+                updates._request_latest()
+
 
 class AboutUpdateTests(unittest.TestCase):
     @classmethod
@@ -135,6 +182,15 @@ class AboutUpdateTests(unittest.TestCase):
             self.wait_result()
         self.assertEqual(self.dialog.update_status.text(), '当前版本无需更新。')
         self.assertFalse(self.dialog.update_link.isVisible())
+
+    def test_unexpected_worker_exception_does_not_hang_dialog(self):
+        with patch.object(updates, 'check_latest', side_effect=RuntimeError('boom')):
+            self.open_dialog()
+            self.dialog.check_button.click()
+            self.wait_result()
+        self.assertTrue(self.dialog.check_button.isEnabled())
+        self.assertFalse(self.dialog._update_timer.isActive())
+        self.assertIn('异常', self.dialog.update_status.text())
 
 
 if __name__ == '__main__':

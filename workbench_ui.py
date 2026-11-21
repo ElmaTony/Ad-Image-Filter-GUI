@@ -5,6 +5,10 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListView, QAbstractItemView,
     QSplitter, QSizePolicy, QScrollArea, QPushButton, QButtonGroup, QGridLayout,
 )
+from qfluentwidgets import (
+    TransparentPushButton, PrimaryPushButton, PushButton, ComboBox,
+    SearchLineEdit, TextEdit, CaptionLabel, FluentIcon as FIF, isDarkTheme,
+)
 import cds_tokens as T
 
 
@@ -76,10 +80,6 @@ def adapt_workbench(app):
     app.bot.setFixedHeight(102 if narrow else 66)
     app.local_notice.setVisible(not narrow)
     app.status.setMaximumWidth(max(160, app.width() - 410))
-from qfluentwidgets import (
-    TransparentPushButton, PrimaryPushButton, PushButton, ComboBox,
-    SearchLineEdit, TextEdit, CaptionLabel, FluentIcon as FIF, isDarkTheme,
-)
 
 
 def configure_fonts():
@@ -187,9 +187,6 @@ def build_workbench(app):
     app.btn_reset_filters = button('btn_reset_filters', '清除筛选', app.clear_filters, fbar)
     heading.addWidget(app.btn_reset_filters)
     fl.addLayout(heading)
-    # 全局分类摘要留作辅助说明，当前显示/全部待审由独立标签明确展示。
-    app.review_summary = CaptionLabel('添加文件夹，开始本地扫描', fbar)
-    app.review_summary.hide()
     app.f_verdict.currentIndexChanged.connect(lambda _: app.refresh())
 
     filters = QHBoxLayout()
@@ -402,7 +399,6 @@ def build_workbench(app):
     app.seg_disposal = Segmented([('隔离', 'quarantine'), ('回收站', 'recycle'), ('删除', 'delete')], bot)
     app.seg_disposal.setFixedWidth(216)
     app.seg_disposal.setToolTip('隔离可撤销；回收站由系统恢复；删除不可恢复')
-    app.cb_disposal = None
     app.btn_dq, app.btn_dr, app.btn_dd = app.seg_disposal._btns
     app.seg_disposal.valueChanged.connect(lambda _: app._update_count_label())
     controls.addWidget(app.seg_disposal)
@@ -411,7 +407,6 @@ def build_workbench(app):
     controls.addWidget(button('btn_dispose', '隔离 0 张', app.execute_disposal, bot, FIF.DELETE, True))
     bl.addWidget(app.disposal_controls, 0, 1)
     app.btn_dispose.setMinimumWidth(132)
-    app._bot_css = ''
     root.addWidget(bot)
 
     footer = QWidget(app)

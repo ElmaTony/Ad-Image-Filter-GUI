@@ -556,6 +556,186 @@ class WorkbenchTests(unittest.TestCase):
             compact.close()
             self.qt.processEvents()
 
+    def test_poll_queue_handles_concurrent_scan_and_disposal_events(self):
+        self.app._scan_active = True
+        self.app._disposing = True
+        self.app.scan_q.put(('cancelled', None))
+        self.app.scan_q.put(('disposed', ('quarantine', 1, [], [self.rows[0]['path']],
+                                          str(self.app._quarantine_root()), [])))
+        self.app._poll_queue()
+        self.assertFalse(self.app._scan_active)
+        self.assertFalse(self.app._disposing)
+        self.assertFalse(any(it['path'] == self.rows[0]['path'] for it in self.app.items))
+
+    def test_theme_toggle_refreshes_segmented_button_text_contrast(self):
+        from qfluentwidgets import isDarkTheme
+        self.app.seg_disposal.set_index(0, animate=False)
+        before_dark = isDarkTheme()
+        before_qss = self.app.btn_dq.styleSheet()
+        self.app.toggle_theme()
+        self.pump(.1)
+        after_dark = isDarkTheme()
+        after_qss = self.app.btn_dq.styleSheet()
+        self.assertNotEqual(before_dark, after_dark)
+        expected_color = '#f5f5f5' if after_dark else '#151515'
+        self.assertIn(expected_color, after_qss)
+        self.assertNotEqual(before_qss, after_qss)
+
+    def test_checkbox_click_with_small_drag_does_not_recheck_card(self):
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtCore import QEvent
+        path0 = self.app.model.items[0]['path']
+        self.app.toggle_check(0)
+        self.assertIn(path0, self.app.checked)
+        vr = self.app.grid.visualRect(self.app.model.index(0, 0))
+        start = QPointF(vr.left() + 20, vr.top() + 20)
+        end = QPointF(start.x() + 10, start.y() + 10)
+        vp = self.app.grid.viewport()
+        self.app.eventFilter(vp, QMouseEvent(QEvent.MouseButtonPress, start, start, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+        self.app.eventFilter(vp, QMouseEvent(QEvent.MouseMove, end, end, Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+        self.app.eventFilter(vp, QMouseEvent(QEvent.MouseButtonRelease, end, end, Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+        self.assertNotIn(path0, self.app.checked)
+        self.assertFalse(self.app._sel_band.isVisible())
+
+    def test_lightbox_wheel_zoom_direction_and_close_clears_reference(self):
+        from PySide6.QtCore import QPoint, QPointF
+        self.app.grid.setCurrentIndex(self.app.model.index(0, 0))
+        self.app.open_big()
+        viewer = self.app._big_win
+        self.assertTrue(self.pump(until=lambda: viewer._pix is not None, timeout=5))
+        center = QPointF(viewer.width() / 2, viewer.height() / 2)
+
+        class Wheel:
+            def __init__(self, dy): self._dy = dy
+            def angleDelta(self): return QPoint(0, self._dy)
+            def position(self): return center
+
+        s0 = viewer.scale
+        viewer.wheelEvent(Wheel(120))
+        self.assertGreater(viewer.scale, s0)
+        s1 = viewer.scale
+        viewer.wheelEvent(Wheel(-120))
+        self.assertLess(viewer.scale, s1)
+        viewer.close()
+        self.pump(.05)
+        self.assertIsNone(self.app._big_win)
+
+    def test_export_report_handles_oserror_without_crashing(self):
+        from PySide6.QtWidgets import QFileDialog
+        errors = []
+        self.app._info = lambda title, content: errors.append((title, content))
+        with patch.object(QFileDialog, 'getSaveFileName', return_value=(str(self.root / 'locked.csv'), 'csv')), \
+                patch('builtins.open', side_effect=PermissionError('file in use')):
+            self.app.export_report()
+        self.assertTrue(errors and errors[0][0] == '导出失败')
+
+    def test_undo_only_restores_latest_batch_not_older_same_src_and_retries_on_failure(self):
+        q_root = self.app._quarantine_root()
+        target = Path(self.rows[0]['path'])
+        # 第一批：先隔离一次，然后在原位置再放一张同名新图
+        old_bytes = target.read_bytes()
+        moved, errors, _ = af.apply_quarantine([{'path': str(target)}], [str(self.root)], q_root, lambda _: None)
+        self.assertEqual((moved, errors), (1, []))
+        Image.new('RGB', (400, 300), (200, 40, 40)).save(target)
+        new_bytes = target.read_bytes()
+        self.assertNotEqual(old_bytes, new_bytes)
+
+        # 第二批通过工作台隔离，再执行撤销：应只还原第二批，第一批仍保留在隔离区
+        self.app._roots = [str(self.root)]
+        self.app.checked = {str(target)}
+        self.app.model.checked = self.app.checked
+        self.app.execute_disposal()
+        self.assertTrue(self.pump(until=lambda: not self.app._disposing))
+        self.assertEqual(len(af.list_quarantine(q_root)), 2)
+
+        # 模拟第一次撤销失败 -> 保留 _undo_batch 可重试
+        with patch.object(af, 'restore_quarantine_items', return_value=(0, ['占用失败'])):
+            self.app.undo_disposal()
+            self.assertTrue(self.pump(until=lambda: not self.app._disposing))
+        self.assertIsNotNone(self.app._undo_batch)
+        self.assertTrue(self.app.btn_undo.isEnabled())
+
+        # 第二次真实撤销 -> 仅恢复第二批，第一批历史文件不误还原
+        self.app.undo_disposal()
+        self.assertTrue(self.pump(until=lambda: not self.app._disposing))
+        self.assertTrue(target.exists())
+        self.assertEqual(target.read_bytes(), new_bytes)
+        self.assertEqual(len(af.list_quarantine(q_root)), 1)
+
+    def test_remove_folder_clears_items_and_add_folders_dedups_case_insensitive(self):
+        sub_a = self.root / 'FolderA'
+        sub_b = self.root / 'FolderB'
+        sub_a.mkdir()
+        sub_b.mkdir()
+        pa = sub_a / 'a.jpg'
+        pb = sub_b / 'b.jpg'
+        Image.new('RGB', (320, 240), (10, 20, 30)).save(pa)
+        Image.new('RGB', (320, 240), (30, 20, 10)).save(pb)
+        self.app.add_folders([str(sub_a), str(sub_a).lower() + '\\', str(sub_b)])
+        self.assertEqual(len(self.app.get_roots()), 2)
+        self.app.items = [
+            {'path': str(pa), 'verdict': 'ad', 'score': 90, 'reasons': [], 'ocr_text': ''},
+            {'path': str(pb), 'verdict': 'ad', 'score': 90, 'reasons': [], 'ocr_text': ''},
+        ]
+        self.app.checked = {str(pa), str(pb)}
+        self.app.model.checked = self.app.checked
+        self.app.refresh()
+        self.app.remove_folder(str(sub_a))
+        self.assertEqual([it['path'] for it in self.app.items], [str(pb)])
+        self.assertEqual(self.app.checked, {str(pb)})
+
+    def test_rule_editor_rejects_nonpositive_weight_and_deletes_multiple_rows(self):
+        from PySide6.QtWidgets import QTableWidgetItem
+        dlg = self.app.build_rule_editor()
+        dlg.show_errors = False
+        try:
+            tbl = dlg._pages['ocr_keywords']['table']
+            before_rows = tbl.rowCount()
+            dlg._add_row(tbl, True)
+            r = tbl.rowCount() - 1
+            tbl.setItem(r, 0, QTableWidgetItem('test_kw'))
+            tbl.setItem(r, 2, QTableWidgetItem('0'))
+            self.assertFalse(dlg.do_save())
+            tbl.setItem(r, 2, QTableWidgetItem('1.5'))
+            self.assertFalse(dlg.do_save())
+            # 选中最后两行验证批量删除
+            tbl.clearSelection()
+            tbl.selectRow(r)
+            tbl.item(r - 1, 0).setSelected(True)
+            tbl.item(r, 0).setSelected(True)
+            del_btn = next(b for b in dlg._pages['ocr_keywords']['page'].findChildren(gui.TransparentPushButton)
+                           if '删除' in b.text())
+            del_btn.click()
+            self.assertEqual(tbl.rowCount(), before_rows - 1)
+        finally:
+            dlg.close()
+            dlg.deleteLater()
+
+    def test_real_toast_and_compact_command_palette_fit_window(self):
+        from cds_widgets import CDSToast, CDSCommandPalette
+        CDSToast._stack.clear()
+        self.app.resize(640, 480)
+        self.pump(.1)
+        toast = CDSToast.show(self.app, '一条很长的提示消息用于验证窄窗下不会被裁切出左边界', 'ok')
+        self.pump(.05)
+        self.assertGreaterEqual(toast.x(), 0)
+        self.assertLessEqual(toast.x() + toast.width(), self.app.width())
+        self.assertIsNotNone(toast.graphicsEffect())
+        toast._done()
+        self.pump(.05)
+        self.assertNotIn(toast, CDSToast._stack)
+
+        ran = []
+        pal = CDSCommandPalette.popup(self.app, [('执行示例', lambda: ran.append(True))])
+        self.pump(.05)
+        self.assertGreaterEqual(pal.x(), 0)
+        self.assertGreaterEqual(pal.y(), 0)
+        self.assertLessEqual(pal.x() + pal.width(), self.app.width())
+        self.assertLessEqual(pal.y() + pal.height(), self.app.height())
+        pal.list.itemClicked.emit(pal.list.item(0))
+        self.assertEqual(ran, [True])
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

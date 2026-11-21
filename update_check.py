@@ -56,6 +56,10 @@ def _request_latest(token=None):
         return json.loads(body)
 
 
+def _is_valid_token(token: str) -> bool:
+    return bool(token) and token.isascii() and not any(ord(ch) < 32 or ord(ch) == 127 for ch in token)
+
+
 def _git_token():
     """读取本机 Git 凭据助手的可用凭据，禁止交互式登录。"""
     executable = 'git.exe' if os.name == 'nt' else 'git'
@@ -78,22 +82,29 @@ def _git_token():
         for line in result.stdout.splitlines():
             key, _, value = line.partition(b'=')
             if key == b'password' and value.isascii():
-                return value.decode('ascii') or None
+                decoded = value.decode('ascii')
+                if _is_valid_token(decoded):
+                    return decoded
     return None
 
 
 def _latest_metadata():
     token = os.environ.get(TOKEN_ENV, '').strip()
     if token:
+        if not _is_valid_token(token):
+            raise UpdateCheckError(f'环境变量 {TOKEN_ENV} 包含无效字符，请检查后重试。')
         return _request_latest(token)
     try:
         return _request_latest()
     except HTTPError as error:
         if error.code not in (401, 403, 404, 429):
             raise
+        code = error.code
         error.close()
         token = _git_token()
         if not token:
+            if code == 429:
+                raise UpdateCheckError('GitHub API 请求过于频繁，请稍后重试或打开发行页查看。') from None
             raise UpdateCheckError('无法读取此仓库的发行版。请使用有访问权限的 GitHub 账号登录后查看。') from None
     return _request_latest(token)
 
@@ -108,17 +119,25 @@ def _version_parts(value):
 def check_latest(current_version: str) -> Update | None:
     """返回新版和可信下载地址，已是最新版或更高时返回 None。"""
     try:
+        current = _version_parts(current_version)
+    except ValueError:
+        raise UpdateCheckError('当前软件版本号格式无效，无法核对更新。') from None
+    try:
         release = _latest_metadata()
+        if not isinstance(release, dict):
+            raise ValueError('Expected release object')
         tag = release['tag_name']
         version = _version_parts(_HISTORICAL.get(tag, tag))
         if release.get('draft') or release.get('prerelease'):
             raise ValueError('Expected a published stable release')
-        if version <= _version_parts(current_version):
+        if version <= current:
             return None
 
         # 链接仅使用符合预期的项目、标签和安装包名称。
         url = f'{RELEASES_URL}/download/{tag}/{EXE_NAME}'
-        assets = release.get('assets', [])
+        assets = release.get('assets')
+        if not isinstance(assets, list):
+            assets = []
         found = any(asset.get('name') == EXE_NAME and asset.get('state') == 'uploaded' and
                     asset.get('browser_download_url') == url for asset in assets if isinstance(asset, dict))
         return Update('v' + '.'.join(map(str, version)), f'{RELEASES_URL}/tag/{tag}', url if found else None)

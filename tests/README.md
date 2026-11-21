@@ -6,11 +6,11 @@
 |---|---|---|---|
 | 引擎自测 | `python ad_filter.py --selftest`（项目根） | 引擎全流程回归 | ✅ 合成 fixture |
 | GUI 功能自测 | `python ad_filter.py --gui-test`（项目根） | 132 项 | ✅ 合成 fixture，临时隔离区 |
-| 工作台回归 | `python tests/test_workbench.py` | 28 用例 | ✅ 临时图片与配置 |
-| 引擎回归 | `python tests/test_scan_engine.py` | 11 用例 | ✅ 临时文件与隔离目录 |
+| 工作台回归 | `python tests/test_workbench.py` | 37 用例 | ✅ 临时图片与配置 |
+| 引擎回归 | `python tests/test_scan_engine.py` | 17 用例 | ✅ 临时文件与隔离目录 |
 | 审查修复回归 | `python tests/test_review_fixes.py` | 17 用例 | ✅ 临时数据，含双进程和真实 OCR |
 | 二维码回归 | `python tests/test_qr_detection.py` | 7 用例 | ✅ 临时合成图，使用真实解码器 |
-| 更新检查 | `python tests/test_update_check.py` | 7 用例 | ✅ 模拟 API 与独立临时目录 |
+| 更新检查 | `python tests/test_update_check.py` | 10 用例 | ✅ 模拟 API 与独立临时目录 |
 | 新旧对照 | `python tests/benchmark_scan.py` | 逐字段比对并计时 | ✅ 12 张合成图片，可附加本机只读样本 |
 | UI 元素审查 | `python tests/audit_ui.py` | 100 项 | ✅ 深浅主题、三个尺寸、合成图片 |
 | 端到端 | `python tests/test_e2e.py` | 37 项 | ⚠️ 需要本地真实样本 |
@@ -26,6 +26,8 @@
 
 `v1.4.0` 的更新检查回归 7 项覆盖主动触发、版本数字比较、旧日期标签、缺少附件、网络失败、私有仓库访问和重试。使用已登录的 GitHub 凭据读取真实私有仓库发行元数据，分别验证新版和无需更新。GUI 132 项、工作台 28 项通过；打包后的三个自测入口均退出 0。Windows EXE 版本资源及包内版本为 `1.4.0`，用户数据和扫描历史未变动。
 
+`v1.4.1` 全面代码审查与死代码清理：新增 18 项回归用例（引擎 17 项、工作台 37 项、更新检查 10 项），覆盖同线程重入 `quarantine_lock` 与锁文件定长、只读 `list_quarantine` 无副作用、盘符根与默认隔离区跳过、纯色极端横条保留形状疑似、损坏 EXIF 预览容错、回收站/删除/聚类去重/历史 `keep=0`、并发队列事件互斥防锁死、主题切换后分段按钮文字对比度、点击勾选圆圈微拖防框选回勾、大图正向滚轮缩放、CSV 写入失败提示、精确按 `dst` 撤销与失败重试、目录移除同步清理与大小写去重、规则权重校验与多行删除、真实 `CDSToast` 与窄屏 `CDSCommandPalette`、`update_check` 环境变量令牌/429 限流/空 `assets`/非预期异常恢复。精简 `cds_tokens.py`/`cds_widgets.py`/`cds_layouts.py` 并清理过时构建/设计/未引用资源文件；所有测试脚本统一补齐 `try/finally` 与临时目录隔离。
+
 ## 需要真实样本的用例
 
 `test_e2e.py` 需要 `testdata/real4_*` 与 `real6_*` 真实广告样本（个人数据，**不随仓库分发**，被 `.gitignore` 排除）。精度测试不依赖这些真实图片。换机器时：
@@ -40,8 +42,8 @@
 - **test_accuracy.py**：6 类广告正样本（拼图+QR / 长条 / 中央透明水印 / 角落小水印 / 深底白字 / 模糊小字）+ 6 类干扰负样本（普通风景 / 正常文字菜单 / 版权水印 / 图表 / 纯色壁纸 / 手机截图），统计召回率与误报率
 - **test_workbench.py**：独立异常筛选、大小写搜索、跨筛选全选、隐藏项确认、隔离撤销、删除范围、导入控件同步、完整 OCR、焦点保持、任务禁用态、多文件夹与小窗口。
 - **audit_ui.py**：标题栏按钮几何、顶栏/筛选条高度、网格单元尺寸、无侧栏断言、底部停靠完整性、像素级语义色（执行处置=红、品牌橙在场）
-- **preview_layouts.py**：用临时合成数据输出大图横/竖图及纯净查看截图到 `_preview/`；`--interactive` 可用于原生窗口检查。
-- **preview_dialogs.py**：使用独立合成历史、图片和隔离清单输出深浅主题弹窗截图到 `_preview/dialogs/`。
+- **preview_layouts.py --output <目录>**：用临时合成数据输出大图横/竖图及纯净查看截图到指定目录；`--interactive` 可用于原生窗口检查。
+- **preview_dialogs.py --output <目录>**：使用独立合成历史、图片和隔离清单输出深浅主题弹窗截图到指定目录。
 - **preview_workbench.py --output <目录>**：使用临时合成图片和独立配置、缓存、历史、日志、隔离区，输出首次启动、混合分类、隐藏已选、全部已选、筛选空结果、异常、日志、多文件夹和窄屏的 Qt 截图；输出位置由调用者指定。
 
 2026-10-30 弹窗更新：新增命令面板的 Esc、重复按钮、Ctrl+K、方向键与 Enter 检查；设置路径验证、导入与恢复默认；自定义隔离位置的真实移动、扫描排除和旧隔离区恢复；弹窗导航、历史搜索和固定操作栏检查。工作台回归在默认与 200% 缩放下运行，历史与配置均隔离在临时目录。

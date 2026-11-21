@@ -159,10 +159,14 @@ def normalize_config(user: dict) -> dict:
                 number(rule, 'weight', 1, 10000)
     if cfg['disposal'] not in ('quarantine', 'recycle', 'delete'):
         raise ValueError('处置方式无效')
-    if not isinstance(cfg['quarantine_dir'], str):
+    qdir = cfg['quarantine_dir']
+    if not isinstance(qdir, str) or '\x00' in qdir:
         raise ValueError('隔离目录须为路径文本')
+    if qdir.strip() and not Path(qdir.strip()).expanduser().is_absolute():
+        raise ValueError('隔离目录须为完整路径')
     locations = cfg['quarantine_locations']
-    if not isinstance(locations, list) or not all(isinstance(p, str) and Path(p).is_absolute() for p in locations):
+    if not isinstance(locations, list) or not all(
+            isinstance(p, str) and '\x00' not in p and Path(p).is_absolute() for p in locations):
         raise ValueError('隔离区历史目录须为完整路径列表')
     return cfg
 
@@ -208,6 +212,7 @@ def save_config(cfg: dict) -> None:
 
 def _write_json_atomic(path: Path, data) -> None:
     tmp = None
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
                                          prefix=path.name + '.', suffix='.tmp', delete=False) as stream:
@@ -230,25 +235,44 @@ def normalize_text(s: str) -> str:
 class Cache:
     def __init__(self, path: Path):
         # GUI 扫描在多线程里写缓存，允许跨线程 + 程序内锁串行化
-        self.conn = sqlite3.connect(str(path), check_same_thread=False)
-        self.conn.execute(
-            """CREATE TABLE IF NOT EXISTS results(
-                path TEXT PRIMARY KEY, size INTEGER, mtime REAL,
-                verdict TEXT, score REAL, reasons TEXT, ocr_text TEXT, ts REAL)"""
-        )
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS hashes(path TEXT PRIMARY KEY, size INTEGER, mtime REAL, hash INTEGER)"
-        )
-        self.conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
-        if 'cfg_hash' not in {row[1] for row in self.conn.execute('PRAGMA table_info(results)')}:
+        self.conn = sqlite3.connect(str(path), timeout=15.0, check_same_thread=False)
+        try:
+            self.conn.execute("PRAGMA busy_timeout=15000")
             try:
-                self.conn.execute("ALTER TABLE results ADD COLUMN cfg_hash TEXT NOT NULL DEFAULT ''")
+                self.conn.execute("PRAGMA journal_mode=WAL")
             except sqlite3.OperationalError:
-                if 'cfg_hash' not in {row[1] for row in self.conn.execute('PRAGMA table_info(results)')}:
-                    raise
-        self.conn.commit()
+                pass
+            self.conn.execute(
+                """CREATE TABLE IF NOT EXISTS results(
+                    path TEXT PRIMARY KEY, size INTEGER, mtime REAL,
+                    verdict TEXT, score REAL, reasons TEXT, ocr_text TEXT, ts REAL)"""
+            )
+            self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS hashes(path TEXT PRIMARY KEY, size INTEGER, mtime REAL, hash INTEGER)"
+            )
+            self.conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
+            if 'cfg_hash' not in {row[1] for row in self.conn.execute('PRAGMA table_info(results)')}:
+                try:
+                    self.conn.execute("ALTER TABLE results ADD COLUMN cfg_hash TEXT NOT NULL DEFAULT ''")
+                except sqlite3.OperationalError:
+                    if 'cfg_hash' not in {row[1] for row in self.conn.execute('PRAGMA table_info(results)')}:
+                        raise
+            self.conn.commit()
+        except Exception:
+            self.conn.close()
+            raise
         self.lock = threading.Lock()
         self.result_version = ''
+
+    def close(self):
+        with self.lock:
+            self.conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
 
     def check_config_version(self, cfg: dict, enable=None) -> bool:
         """规则/阈值变更后自动清空缓存：旧判定是基于旧规则的，必须全量重判。
@@ -408,36 +432,16 @@ def _ocr_ndarray(img) -> list[str]:
     return [str(item[1]) for item in result]
 
 
-def bright_pass(crop: Image.Image, thr: int) -> Image.Image:
-    """亮通提取：把高亮度+低饱和的笔画（半透明白描边字）抠成黑白二值图"""
-    import numpy as np
-
-    hsv = np.asarray(crop.convert("HSV"))
-    v = hsv[:, :, 2]
-    s = hsv[:, :, 1]
-    mask = (v >= thr) & (s <= 70)
-    return _bright_from_mask(mask)
-
-
 def _bright_from_mask(mask) -> Image.Image:
     import numpy as np
     out = np.where(mask, 0, 255).astype("uint8")  # 笔画黑字白底
-    im = Image.fromarray(out, mode="L").convert("RGB")
+    im = Image.fromarray(out).convert("RGB")
     return im.filter(ImageFilter.MaxFilter(3))
 
 
 def is_blank_image(img: Image.Image) -> bool:
     """只有每个 RGB 通道均完全一致时才跳过；稀疏文字和等亮度色差不能跳过。"""
     return all(low == high for low, high in img.convert('RGB').getextrema())
-
-
-def bright_mask_ratio(img: Image.Image, thr: int) -> float:
-    """高亮+低饱和像素占比：即 bright_pass 会保留的"笔画"面积。
-    占比趋近 0 时提亮结果是整片白色，跑 OCR 不可能识别出任何文字（可安全跳过）。"""
-    import numpy as np
-
-    hsv = np.asarray(img.convert("HSV"))
-    return float(((hsv[:, :, 2] >= thr) & (hsv[:, :, 1] <= 70)).mean())
 
 
 def load_pixel_image(path: Path, max_dim: int) -> Image.Image:
@@ -458,11 +462,20 @@ def load_display_image(path: Path, max_dim=None):
     """显示专用方向处理；不更改识别通道的像素、尺寸或算法。"""
     with Image.open(path) as im:
         original = im.size
-        if im.getexif().get(274) in (5, 6, 7, 8):
-            original = original[::-1]
+        try:
+            if im.getexif().get(274) in (5, 6, 7, 8):
+                original = original[::-1]
+        except Exception:
+            pass
         if max_dim is not None:
-            im.draft('RGB', (max_dim, max_dim))
-        image = ImageOps.exif_transpose(im).convert('RGB')
+            try:
+                im.draft('RGB', (max_dim, max_dim))
+            except Exception:
+                pass
+        try:
+            image = ImageOps.exif_transpose(im).convert('RGB')
+        except Exception:
+            image = im.convert('RGB')
     if max_dim is not None and max(image.size) > max_dim:
         image = ImageOps.contain(image, (max_dim, max_dim))
     return image, original
@@ -528,12 +541,13 @@ def detect_qr(img: Image.Image, *, retry_image: Image.Image | None = None) -> tu
     for image in (img, retry_image):
         if image is None:
             break
-        gray = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2GRAY)
+        rgb = image if image.mode == "RGB" else image.convert("RGB")
+        gray = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2GRAY)
         try:
             _, decoded, points, _ = detector.detectAndDecodeMulti(gray)
         except (cv2.error, UnicodeDecodeError):
             break
-        texts = [text for text in decoded if text.strip()]
+        texts = [text for text in (decoded or ()) if text and text.strip()]
         if texts:
             return texts, True
         if points is None or not len(points):
@@ -664,13 +678,15 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
             reasons.append({"type": "error", "label": f"解码失败 {e}"})
             verdict, score = "error", 0
 
-        # 仅完全均匀的像素可以跳过；低方差不能证明不存在小字或二维码。
+        # 仅完全均匀的像素可以跳过内容通道；低方差不能证明不存在小字或二维码。
+        # 若此前已命中极端横条，仍保留形状提示落回疑似，不因开内容通道而漏报。
         if img is not None and verdict == "clean" and is_blank_image(img):
-            reasons.append({"type": "blank", "label": "近乎纯色图（跳过识别）"})
-            result = {"path": str(path), "verdict": "clean", "score": 0,
-                      "reasons": [], "ocr_text": ""}
-            cache.put(str(path), size, mtime, "clean", 0, [], "", version)
-            return result
+            if not shape_long:
+                result = {"path": str(path), "verdict": "clean", "score": 0,
+                          "reasons": [], "ocr_text": ""}
+                cache.put(str(path), size, mtime, "clean", 0, [], "", version)
+                return result
+            img = None
 
         if img is not None and verdict == "clean" and enable.get("qr"):
             try:
@@ -702,8 +718,9 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
                 else:
                     # 上下条带垂直拼接成一张图（16px 白缝防跨缝连字）：
                     # 原来两条带 × (原图+提亮) = 4 次推理，拼接后只需 2 次
-                    top = img.crop((0, 0, W, max(24, strip)))
-                    bot = img.crop((0, max(0, H - strip), W, H))
+                    band = max(24, strip)
+                    top = img.crop((0, 0, W, min(H, band)))
+                    bot = img.crop((0, max(0, H - band), W, H))
                     gap = 16
                     combo = Image.new("RGB", (W, top.height + gap + bot.height), (255, 255, 255))
                     combo.paste(top, (0, 0))
@@ -772,18 +789,51 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict) -> dict:
         verdict, score = "suspect", 30
 
     result = {"path": str(path), "verdict": verdict, "score": score, "reasons": reasons, "ocr_text": ocr_text}
-    cache.put(str(path), size, mtime, verdict, score, reasons, ocr_text, version)
+    if verdict != "error":
+        cache.put(str(path), size, mtime, verdict, score, reasons, ocr_text, version)
     return result
 
 
 # ---------------------------------------------------------------- 扫描编排
+def _norm_root(root) -> str:
+    """规范化扫描根目录字符串：保留盘符根目录（如 D:\\），其余去除尾部分隔符。"""
+    p = Path(root)
+    text = str(p)
+    anchor = p.anchor
+    if anchor and os.path.normcase(text) == os.path.normcase(anchor):
+        return text
+    stripped = text.rstrip("\\/")
+    return stripped or text
+
+
+def _path_is_within(path_str: str, root_str: str) -> bool:
+    p_norm = os.path.normcase(path_str)
+    r_norm = os.path.normcase(root_str)
+    if p_norm == r_norm:
+        return True
+    prefix = r_norm if r_norm.endswith(os.sep) else r_norm + os.sep
+    return p_norm.startswith(prefix)
+
+
 def gather_images(roots: list[str], cfg: dict) -> list[Path]:
     files: list[Path] = []
-    excluded = [Path(p).expanduser().resolve() for p in
-                [cfg.get('quarantine_dir', '')] + cfg.get('quarantine_locations', []) if p]
+    excluded = []
+    for p in [cfg.get('quarantine_dir', '')] + cfg.get('quarantine_locations', []):
+        if p:
+            try:
+                excluded.append(Path(p).expanduser().resolve())
+            except OSError:
+                continue
+
     def is_quarantined(path):
-        resolved = path.resolve()
+        if any(part.startswith(QUARANTINE_NAME) for part in path.parts):
+            return True
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return False
         return any(resolved == q or q in resolved.parents for q in excluded)
+
     for root in roots:
         rootp = Path(root)
         if is_quarantined(rootp):
@@ -802,11 +852,11 @@ def gather_images(roots: list[str], cfg: dict) -> list[Path]:
 
 
 def _root_of(path_str: str, roots: list[str]) -> str:
-    """文件归属到最近的导入根目录（用路径前缀 + 分隔符边界，避免 C:\a 匹配 C:\ab）。"""
+    """文件归属到最近的导入根目录（用路径前缀 + 分隔符边界，兼容盘符根与 Windows 大小写）。"""
     best = ""
     for r in roots:
-        rr = str(Path(r)).rstrip("\\/")
-        if path_str == rr or path_str.startswith(rr + os.sep):
+        rr = _norm_root(r)
+        if _path_is_within(path_str, rr):
             if len(rr) > len(best):
                 best = rr
     return best or str(Path(path_str).parent)
@@ -835,7 +885,17 @@ def _scan_worker(roots, cfg, enable, cache, out_q, cancel, pause):
 
     # 文件收集放后台线程：大目录 os.walk 会卡住 UI
     files = gather_images(roots, cfg)
-    files = list(dict.fromkeys(files))  # 根目录互相重叠时会重复收集，去重
+    seen_files: set[str] = set()
+    unique_files: list[Path] = []
+    for p in files:
+        try:
+            key = os.path.normcase(str(p.resolve()))
+        except OSError:
+            key = os.path.normcase(str(p))
+        if key not in seen_files:
+            seen_files.add(key)
+            unique_files.append(p)
+    files = unique_files
     if not files:
         out_q.put(("total", 0))
         out_q.put(("done", None))
@@ -856,7 +916,7 @@ def _scan_worker(roots, cfg, enable, cache, out_q, cancel, pause):
     files = valid_files
 
     # —— 文件夹级进度：按导入根聚合，UI 实时显示每个文件夹 已完成/总数 ——
-    roots_list = [str(Path(r)).rstrip("\\/") for r in roots]
+    roots_list = [_norm_root(r) for r in roots]
     file_root = {str(p): _root_of(str(p), roots_list) for p in files}
     folder_total: dict[str, int] = {}
     for r in file_root.values():
@@ -880,10 +940,10 @@ def _scan_worker(roots, cfg, enable, cache, out_q, cancel, pause):
         out_q.put(("done", None))
         return
     cached = cache.get_batch(infos, result_signature(cfg, enable))
-    files_to_scan = [p for p, info in zip(files, infos) if str(p) not in cached]
+    files_to_scan = [p for p in files if str(p) not in cached]
     out_q.put(("cached", len(cached)))  # 通知 UI 缓存命中数
     done = 0
-    for p, info in zip(files, infos):
+    for p in files:
         if stopped():
             out_q.put(('cancelled', None))
             return
@@ -998,6 +1058,7 @@ def _load_manifest(path: Path) -> dict:
 
 _QUARANTINE_LOCKS = {}
 _QUARANTINE_LOCKS_GUARD = threading.Lock()
+_QUARANTINE_LOCK_DEPTH = threading.local()
 
 
 def _quarantine_control(root, name):
@@ -1009,39 +1070,56 @@ def _quarantine_control(root, name):
 
 @contextmanager
 def quarantine_lock(root, timeout=30):
-    """同目录的线程锁 + 系统文件锁；异常退出后系统自动释放。"""
+    """同目录的线程锁 + 系统文件锁；支持同线程重入，异常退出后系统自动释放。"""
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     key = os.path.normcase(str(root))
     with _QUARANTINE_LOCKS_GUARD:
         lock = _QUARANTINE_LOCKS.setdefault(key, threading.RLock())
-    with lock, open(_quarantine_control(root, '.ad-filter.lock'), 'a+b') as stream:
-        if stream.tell() == 0:
-            stream.write(b'0')
-            stream.flush()
-        deadline = time.monotonic() + timeout
-        while True:
+    depths = getattr(_QUARANTINE_LOCK_DEPTH, 'counts', None)
+    if depths is None:
+        depths = {}
+        _QUARANTINE_LOCK_DEPTH.counts = depths
+    with lock:
+        if depths.get(key, 0) > 0:
+            depths[key] += 1
             try:
+                yield root
+            finally:
+                depths[key] -= 1
+            return
+        fd = os.open(str(_quarantine_control(root, '.ad-filter.lock')), os.O_RDWR | os.O_CREAT, 0o600)
+        with os.fdopen(fd, 'r+b') as stream:
+            if os.fstat(stream.fileno()).st_size == 0:
+                stream.write(b'0')
+                stream.flush()
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    stream.seek(0)
+                    if os.name == 'nt':
+                        import msvcrt
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise OSError('该隔离区正被其他窗口使用，请稍后重试')
+                    time.sleep(.05)
+            depths[key] = 1
+            try:
+                yield root
+            finally:
+                depths[key] -= 1
+                if depths[key] <= 0:
+                    depths.pop(key, None)
                 stream.seek(0)
                 if os.name == 'nt':
-                    import msvcrt
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
                 else:
-                    import fcntl
-                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise OSError('该隔离区正被其他窗口使用，请稍后重试')
-                time.sleep(.05)
-        try:
-            yield root
-        finally:
-            stream.seek(0)
-            if os.name == 'nt':
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(stream, fcntl.LOCK_UN)
+                    fcntl.flock(stream, fcntl.LOCK_UN)
 
 
 def _quarantine_serialized(root_index, timeout=30):
@@ -1126,8 +1204,16 @@ def _journal_quarantine_move(root, item, size):
         os.fsync(stream.fileno())
 
 
+def _root_label(root_path: Path) -> str:
+    if root_path.name:
+        return root_path.name
+    drive = root_path.drive.rstrip(":\\/")
+    return f"盘_{drive}" if drive else "根目录"
+
+
 @_quarantine_serialized(2)
-def apply_quarantine(items: list[dict], roots: list[str], quarantine_root: Path, log_fn) -> tuple[int, list[str], list[str]]:
+def apply_quarantine(items: list[dict], roots: list[str], quarantine_root: Path, log_fn,
+                     *, dst_out: list[str] | None = None) -> tuple[int, list[str], list[str]]:
     """移动到隔离目录，保留 相对扫描根/相对路径；写恢复清单 manifest.json。返回 (成功数, 错误, 成功路径)"""
     quarantine_root = Path(quarantine_root).resolve()
     try:
@@ -1140,33 +1226,40 @@ def apply_quarantine(items: list[dict], roots: list[str], quarantine_root: Path,
     moved = 0
     ok_paths: list[str] = []
     incomplete = False
-    root_names = {str(Path(r).resolve()): Path(r).name for r in roots}
+    root_names = {}
+    for r in roots:
+        rp = Path(r).resolve()
+        root_names[_norm_root(rp)] = _root_label(rp)
     for it in items:
         src = Path(it["path"])
         dst = None
         try:
-            src_res = str(src.resolve())
+            src_abs = Path(os.path.abspath(str(src))) if src.is_symlink() else src.resolve()
+            src_res = str(src_abs)
             root_for = None
             for rp, name in root_names.items():
-                if src_res.lower().startswith(rp.lower() + os.sep) or src_res.lower() == rp.lower():
+                if _path_is_within(src_res, rp):
                     root_for = name
                     rel = src_res[len(rp):].lstrip("\\/")
                     break
             if root_for is None:
                 root_for, rel = "未识别根", src.name
             dst = quarantine_root / root_for / rel
-            if src.resolve().is_relative_to(quarantine_root):
+            if src_abs.is_relative_to(quarantine_root):
                 raise ValueError('文件已经位于当前隔离区中')
-            _safe_quarantine_item({'src': str(src.resolve()), 'dst': str(dst)}, quarantine_root)
+            _safe_quarantine_item({'src': src_res, 'dst': str(dst)}, quarantine_root)
             dst = _unique_destination(dst, '冲突')
             dst.parent.mkdir(parents=True, exist_ok=True)
-            entry = _safe_quarantine_item({'src': str(src.resolve()), 'dst': str(dst),
+            entry = _safe_quarantine_item({'src': src_res, 'dst': str(dst),
                 'time': time.strftime('%F %T'), 'reasons': it.get('reasons', [])}, quarantine_root)
-            _journal_quarantine_move(quarantine_root, entry, src.stat().st_size)
+            st = src.lstat() if src.is_symlink() else src.stat()
+            _journal_quarantine_move(quarantine_root, entry, st.st_size)
             shutil.move(str(src), str(dst))
             manifest['items'].append(entry)
             moved += 1
             ok_paths.append(str(src))
+            if dst_out is not None:
+                dst_out.append(entry['dst'])
             log_fn({"action": "quarantine", "src": str(src), "dst": str(dst)})
         except Exception as e:
             errors.append(f"{src}: {e}")
@@ -1180,7 +1273,7 @@ def apply_quarantine(items: list[dict], roots: list[str], quarantine_root: Path,
     return moved, errors, ok_paths
 
 
-def apply_recycle(items: list[dict], log_fn) -> tuple[int, list[str]]:
+def apply_recycle(items: list[dict], log_fn) -> tuple[int, list[str], list[str]]:
     from send2trash import send2trash
 
     errors, moved, ok_paths = [], 0, []
@@ -1195,7 +1288,7 @@ def apply_recycle(items: list[dict], log_fn) -> tuple[int, list[str]]:
     return moved, errors, ok_paths
 
 
-def apply_delete(items: list[dict], log_fn) -> tuple[int, list[str]]:
+def apply_delete(items: list[dict], log_fn) -> tuple[int, list[str], list[str]]:
     errors, moved, ok_paths = [], 0, []
     for it in items:
         try:
@@ -1208,12 +1301,16 @@ def apply_delete(items: list[dict], log_fn) -> tuple[int, list[str]]:
     return moved, errors, ok_paths
 
 
+@_quarantine_serialized(0)
 def restore_quarantine(quarantine_root: Path, log_fn) -> tuple[int, list[str]]:
+    quarantine_root = Path(quarantine_root).resolve()
+    if not (quarantine_root / "manifest.json").exists() and not (quarantine_root / '.ad-filter-journal.jsonl').exists():
+        return 0, []
     try:
-        entries = list_quarantine(quarantine_root)
+        manifest = _load_quarantine(quarantine_root)
     except Exception as e:
         return 0, [f'读取清单失败：{e}']
-    return restore_quarantine_items(quarantine_root, [item['dst'] for item in entries], log_fn)
+    return restore_quarantine_items(quarantine_root, [item['dst'] for item in manifest.get('items', [])], log_fn)
 
 
 # ---------- 扫描历史 ----------
@@ -1222,7 +1319,8 @@ def append_history(entry: dict, keep: int = 100) -> None:
     try:
         hist = load_history()
         hist.append(entry)
-        _write_json_atomic(HISTORY_PATH, hist[-keep:])
+        trimmed = hist[-keep:] if keep > 0 else []
+        _write_json_atomic(HISTORY_PATH, trimmed)
     except Exception:
         pass
 
@@ -1238,35 +1336,49 @@ def load_history() -> list[dict]:
 
 
 # ---------- 隔离区条目化管理 ----------
-@_quarantine_serialized(0, timeout=.1)
 def list_quarantine(quarantine_root: Path) -> list[dict]:
-    """读 manifest.json，每条附 exists 标记；文件缺失不丢弃（可删记录）。"""
-    manifest_path = quarantine_root / "manifest.json"
-    if not manifest_path.exists() and not (quarantine_root / '.ad-filter-journal.jsonl').exists():
+    """读 manifest.json，每条附 exists 标记；目录或清单不存在时直接返回空，不创建目录。"""
+    quarantine_root = Path(quarantine_root)
+    if not quarantine_root.exists():
         return []
-    manifest = _load_quarantine(quarantine_root)
-    out = []
-    for it in manifest.get("items", []):
-        out.append({**it, "exists": Path(it.get("dst", "")).exists()})
-    return out
+    manifest_path = quarantine_root / "manifest.json"
+    journal_path = quarantine_root / '.ad-filter-journal.jsonl'
+    if not manifest_path.exists() and not journal_path.exists():
+        return []
+    with quarantine_lock(quarantine_root, timeout=.5) as root:
+        if not (root / "manifest.json").exists() and not (root / '.ad-filter-journal.jsonl').exists():
+            return []
+        manifest = _load_quarantine(root)
+        return [{**it, "exists": Path(it.get("dst", "")).exists()} for it in manifest.get("items", [])]
 
 
 def _select_manifest(quarantine_root: Path, dsts: list[str]):
-    """返回 (manifest_path, 选中条目, 剩余条目)。"""
-    manifest_path = quarantine_root / "manifest.json"
+    """返回 (manifest, 选中条目, 剩余条目)。"""
+    quarantine_root = Path(quarantine_root).resolve()
     manifest = _load_quarantine(quarantine_root)
-    _save_quarantine(quarantine_root, manifest)
-    want = set(dsts)
-    picked = [it for it in manifest.get("items", []) if it.get("dst") in want]
-    rest = [it for it in manifest.get("items", []) if it.get("dst") not in want]
-    return manifest_path, manifest, picked, rest
+    if (quarantine_root / '.ad-filter-journal.jsonl').exists():
+        _save_quarantine(quarantine_root, manifest)
+    want = set()
+    for d in dsts:
+        try:
+            want.add(os.path.normcase(str(Path(d).resolve())))
+        except OSError:
+            want.add(os.path.normcase(str(d)))
+    picked, rest = [], []
+    for it in manifest.get("items", []):
+        dst_key = os.path.normcase(str(it.get("dst", "")))
+        if dst_key in want:
+            picked.append(it)
+        else:
+            rest.append(it)
+    return manifest, picked, rest
 
 
 @_quarantine_serialized(0)
 def restore_quarantine_items(quarantine_root: Path, dsts: list[str], log_fn) -> tuple[int, list[str]]:
     """按 dst 精确还原选中条目（manifest 中移除已还原项）。"""
     try:
-        manifest_path, manifest, picked, rest = _select_manifest(quarantine_root, dsts)
+        manifest, picked, rest = _select_manifest(quarantine_root, dsts)
     except Exception as e:
         return 0, [f"读取清单失败：{e}"]
     errors, restored = [], 0
@@ -1285,11 +1397,12 @@ def restore_quarantine_items(quarantine_root: Path, dsts: list[str], log_fn) -> 
         except Exception as e:
             errors.append(f"{src}: {e}")
             rest.append(it)
-    manifest["items"] = rest
-    try:
-        _save_quarantine(quarantine_root, manifest)
-    except OSError as e:
-        errors.append(f'文件已还原，但保存清单失败：{e}')
+    if picked:
+        manifest["items"] = rest
+        try:
+            _save_quarantine(quarantine_root, manifest)
+        except OSError as e:
+            errors.append(f'文件已还原，但保存清单失败：{e}')
     return restored, errors
 
 
@@ -1297,7 +1410,7 @@ def restore_quarantine_items(quarantine_root: Path, dsts: list[str], log_fn) -> 
 def delete_quarantine_items(quarantine_root: Path, dsts: list[str], log_fn) -> tuple[int, list[str]]:
     """按 dst 永久删除选中的隔离文件（manifest 中移除记录）。"""
     try:
-        manifest_path, manifest, picked, rest = _select_manifest(quarantine_root, dsts)
+        manifest, picked, rest = _select_manifest(quarantine_root, dsts)
     except Exception as e:
         return 0, [f"读取清单失败：{e}"]
     errors, deleted = [], 0
@@ -1311,11 +1424,12 @@ def delete_quarantine_items(quarantine_root: Path, dsts: list[str], log_fn) -> t
         except Exception as e:
             errors.append(f"{it.get('dst')}: {e}")
             rest.append(it)
-    manifest["items"] = rest
-    try:
-        _save_quarantine(quarantine_root, manifest)
-    except OSError as e:
-        errors.append(f'文件已删除，但保存清单失败：{e}')
+    if picked:
+        manifest["items"] = rest
+        try:
+            _save_quarantine(quarantine_root, manifest)
+        except OSError as e:
+            errors.append(f'文件已删除，但保存清单失败：{e}')
     return deleted, errors
 
 
@@ -1384,7 +1498,12 @@ def cluster_similar(paths: list[str], threshold: int = 6, cache: Cache | None = 
     parts = threshold + 1 if 0 <= threshold <= 10 else 0
     blocks = [(64*i//parts, 64*(i+1)//parts - 64*i//parts) for i in range(parts)]
     indexes = [{} for _ in blocks]
+    seen: set[str] = set()
     for p in paths:
+        key = os.path.normcase(str(p))
+        if key in seen:
+            continue
+        seen.add(key)
         h = dhash_bits(Path(p), cache)
         if h is None:
             continue
@@ -1408,7 +1527,7 @@ def cluster_similar(paths: list[str], threshold: int = 6, cache: Cache | None = 
 
 # ---------------------------------------------------------------- 测试样本
 def _load_font(size: int):
-    for name in ("msyh.ttc", "msyhbd.ttc", "simhei.ttf", "simsum.ttc", "arial.ttf"):
+    for name in ("msyh.ttc", "msyhbd.ttc", "simhei.ttf", "simsun.ttc", "arial.ttf"):
         p = Path("C:/Windows/Fonts") / name
         if p.exists():
             try:
@@ -1542,9 +1661,7 @@ def _selftest(cache, temporary):
             rows.append((name, "MISSING", "-", []))
             ok = False
             continue
-        t0 = time.time()
         r = analyze_file(p, cfg, cache, {"qr": True, "ocr": True})
-        dt = time.time() - t0
         rows.append((name, r["verdict"], f"{r['score']:.0f}", [h["label"] for h in r["reasons"]]))
         want_ad = name in expect_ad or name in expect_ad_optional
         got_hit = r["verdict"] in ("ad", "suspect")
@@ -1557,38 +1674,35 @@ def _selftest(cache, temporary):
     print("\n自测结果：", "全部通过 ✅" if ok else "存在失败 ❌")
 
     # —— 弱词误伤回归："发布"已从弱词移除，正常图文案不应命中 ——
-    hits_pub, score_pub, _ = score_ocr_texts(["本作品发布于2024年1月"], cfg["ocr_keywords"])
+    _, score_pub, _ = score_ocr_texts(["本作品发布于2024年1月"], cfg["ocr_keywords"])
     pub_ok = score_pub == 0
     print(f"弱词误伤：{'通过 ✅' if pub_ok else '失败 ❌'}（'发布'不命中={pub_ok}）")
     ok = ok and pub_ok
 
     # —— 缓存配置版本失效：规则变更后自动清空旧缓存 ——
-    import tempfile as _tf2
-    _cd = Path(_tf2.mkdtemp(prefix="adfilter_cachever_selftest_"))
+    _cd = Path(tempfile.mkdtemp(prefix="adfilter_cachever_selftest_"))
     try:
-        c = Cache(_cd / "c.db")
-        same = c.check_config_version(cfg)          # 首次：无记录 → 清空并写入 hash，返回 False
-        again = c.check_config_version(cfg)         # 同配置 → True
-        cfg2 = dict(cfg)
-        cfg2["ocr_keywords"] = cfg["ocr_keywords"] + [{"pattern": "x", "weight": 1, "label": "y"}]
-        changed = c.check_config_version(cfg2)      # 规则变了 → False（已清空）
+        with Cache(_cd / "c.db") as c:
+            same = c.check_config_version(cfg)          # 首次：无记录 → 清空并写入 hash，返回 False
+            again = c.check_config_version(cfg)         # 同配置 → True
+            cfg2 = dict(cfg)
+            cfg2["ocr_keywords"] = cfg["ocr_keywords"] + [{"pattern": "x", "weight": 1, "label": "y"}]
+            changed = c.check_config_version(cfg2)      # 规则变了 → False（已清空）
         ver_ok = (not same) and again and (not changed)
         print(f"缓存配置版本：{'通过 ✅' if ver_ok else '失败 ❌'}"
               f"（同配置保留={again}，规则变更清空={not changed}）")
         ok = ok and ver_ok
-        c.conn.close()
     finally:
-        import shutil as _sh
-        _sh.rmtree(_cd, ignore_errors=True)
+        shutil.rmtree(_cd, ignore_errors=True)
 
     # —— 感知哈希聚类自测：同图两份（重编码一次）应聚成一组，不同图不聚 ——
-    import tempfile as _tf
-    _td = Path(_tf.mkdtemp(prefix="adfilter_phash_selftest_"))
+    _td = Path(tempfile.mkdtemp(prefix="adfilter_phash_selftest_"))
     try:
         a = testdir / "type2_长条贴图.png"
         b = _td / "copy.png"
         c = testdir / "normal_01.jpg"
-        Image.open(a).convert("RGB").save(b, quality=72)  # 重编码扰动，指纹仍应近似
+        with Image.open(a) as im:
+            im.convert("RGB").save(b)
         groups = cluster_similar([str(a), str(b), str(c)], threshold=6)
         pair = [g for g in groups if str(a) in g and str(b) in g]
         mixed = [g for g in groups if str(c) in g]
@@ -1602,39 +1716,40 @@ def _selftest(cache, temporary):
     return 0 if ok else 1
 
 
-
-# -*- coding: utf-8 -*-
-# Qt/Fluent 版 GUI（引擎层完全复用）。由 rebuild 脚本拼接进主文件。
-
-# ---------------------------------------------------------------- GUI 功能自测（Qt 版）
 def bench():
-    testdir = APP_DIR / "testdata" / "bench"
-    if not testdir.exists() or len(list(testdir.glob("*.jpg"))) < 100:
-        print("先生成测试样本…")
-        make_fixtures(APP_DIR / "testdata")
-    cfg = load_config()
-    files = gather_images([str(testdir)], cfg)
-    print(f"基准：{len(files)} 张")
+    with tempfile.TemporaryDirectory(prefix="adfilter_bench_") as directory:
+        root = Path(directory)
+        testdir = APP_DIR / "testdata" / "bench"
+        if not testdir.exists() or len(list(testdir.glob("*.jpg"))) < 100:
+            print("先生成临时测试样本…")
+            make_fixtures(root / "fixtures")
+            testdir = root / "fixtures" / "bench"
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+        files = gather_images([str(testdir)], cfg)
+        print(f"基准：{len(files)} 张")
+        if not files:
+            print("无可用基准图片。")
+            return
 
-    for label, enable in (("文件名+形状+二维码", {"filename": True, "shape": True, "qr": True, "ocr": False}),
-                          ("再加OCR(仅条带)", {"filename": True, "shape": True, "qr": False, "ocr": True})):
-        cache = Cache(APP_DIR / "bench_cache.db")
-        cache.conn.execute("DELETE FROM results")
-        cache.conn.commit()
-        t0 = time.time()
-        n = 0
-        for p in files if "OCR" not in label else files[:40]:
-            analyze_file(p, cfg, cache, enable)
-            n += 1
-        cache.commit()
-        cache.conn.close()
-        dt = time.time() - t0
-        print(f"{label:<22} {n} 张，共 {dt:.1f}s，平均 {dt / n * 1000:.0f} ms/张")
+        for label, enable in (("文件名+形状+二维码", {"filename": True, "shape": True, "qr": True, "ocr": False}),
+                              ("再加OCR(仅条带)", {"filename": True, "shape": True, "qr": False, "ocr": True})):
+            with Cache(root / "bench_cache.db") as cache:
+                cache.conn.execute("DELETE FROM results")
+                cache.conn.commit()
+                t0 = time.time()
+                n = 0
+                for p in files if "OCR" not in label else files[:40]:
+                    analyze_file(p, cfg, cache, enable)
+                    n += 1
+                cache.commit()
+            dt = time.time() - t0
+            print(f"{label:<22} {n} 张，共 {dt:.1f}s，平均 {dt / max(1, n) * 1000:.0f} ms/张")
 
 
 def main():
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="广告图过滤（纯本地）")
     ap.add_argument("--make-fixtures", action="store_true", help="生成测试样本")
@@ -1665,17 +1780,22 @@ def main():
         original = [getattr(engine, name) for name in names]
         with tempfile.TemporaryDirectory(prefix='ad_smoke_') as directory:
             root = Path(directory)
+            win = None
             try:
                 for name, filename in zip(names, ('cfg.json', 'cache.db', 'log.jsonl', 'history.json')):
                     setattr(engine, name, root / filename)
-                qapp = QApplication([])
+                qapp = QApplication.instance() or QApplication([])
                 win = run_gui(return_app=True)
                 win._quarantine_override = root / 'quarantine'
                 win.show()
                 QTimer.singleShot(3000, win.close)
                 qapp.exec()
-                win._cache.conn.close()
             finally:
+                if win is not None:
+                    try:
+                        win._cache.close()
+                    except Exception:
+                        pass
                 for name, filename in zip(names, original):
                     setattr(engine, name, filename)
         return

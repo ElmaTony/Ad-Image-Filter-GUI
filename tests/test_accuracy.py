@@ -1,20 +1,18 @@
 # -*- coding: utf-8 -*-
-"""精度压力测试：8 类广告正样本 + 6 类干扰负样本，统计召回/误报"""
-import sys, tempfile, shutil, random
+"""精度压力测试：6 类广告正样本 + 6 类干扰负样本，统计召回/误报"""
+import sys, tempfile, shutil
 from pathlib import Path
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 项目根（相对自身定位，不含机器路径）
 import ad_filter as af
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter
 import numpy as np
 
 td = Path(tempfile.mkdtemp(prefix="ad_acc_"))
-af.CACHE_PATH = td/"c.db"; af.CONFIG_PATH = td/"cfg.json"; af.LOG_PATH = td/"l.jsonl"
-af.HISTORY_PATH = td / 'history.json'
-af.CONFIG_PATH.write_text('{"ui_theme":"dark","workers":8}', encoding="utf-8")
+_orig_paths = (af.CACHE_PATH, af.CONFIG_PATH, af.LOG_PATH, af.HISTORY_PATH)
+cache = None
 F = af._load_font
-rng = np.random.default_rng(11)
 
 def photo_bg(w=1200, h=800, seed=0):
     r = np.random.default_rng(seed)
@@ -128,30 +126,37 @@ for i in range(3):
         d.text((70, 240 + r*180), f"设置项 {r+1}", font=F(32), fill=(40,40,40))
     p = td/f"n6_shot_{i}.png"; im.save(p); neg.append((p, "手机截图"))
 
-cfg = af.load_config()
-cfg["ocr"].update({"enabled": True, "max_dim": 1600, "full_image_if_nothing": True})
-cache = af.Cache(td/"c2.db"); cache.check_config_version(cfg)
-enable = {"filename": True, "shape": True, "qr": True, "ocr": True}
+try:
+    af.CACHE_PATH = td/"c.db"; af.CONFIG_PATH = td/"cfg.json"; af.LOG_PATH = td/"l.jsonl"
+    af.HISTORY_PATH = td / 'history.json'
+    af.CONFIG_PATH.write_text('{"ui_theme":"dark","workers":8}', encoding="utf-8")
+    cfg = af.load_config()
+    cfg["ocr"].update({"enabled": True, "max_dim": 1600, "full_image_if_nothing": True})
+    cache = af.Cache(td/"c2.db"); cache.check_config_version(cfg)
+    enable = {"filename": True, "shape": True, "qr": True, "ocr": True}
 
-print(f"正样本 {len(pos)} 张 / 负样本 {len(neg)} 张\n", flush=True)
-tp = fn = fp = tn = 0
-print("=== 正样本（应命中）===", flush=True)
-for p, kind in pos:
-    r = af.analyze_file(p, cfg, cache, enable)
-    hit = r["verdict"] in ("ad", "suspect")
-    tp += hit; fn += (not hit)
-    mark = "✅" if hit else "❌漏检"
-    print(f"{mark} {kind:<16} {p.name:<24} {r['verdict']:<8} {r['score']:.0f} 分", flush=True)
-print("\n=== 负样本（应判 clean）===", flush=True)
-for p, kind in neg:
-    r = af.analyze_file(p, cfg, cache, enable)
-    ok = r["verdict"] == "clean"
-    tn += ok; fp += (not ok)
-    mark = "✅" if ok else "❌误报"
-    print(f"{mark} {kind:<16} {p.name:<24} {r['verdict']:<8} {r['score']:.0f} 分  {[h['label'][:20] for h in r['reasons']]}", flush=True)
-recall = tp/len(pos)*100
-spec = tn/len(neg)*100
-print(f"\n召回率 {tp}/{len(pos)} = {recall:.1f}%   误报 {fp}/{len(neg)} = {100-spec:.1f}%   特异度 {spec:.1f}%", flush=True)
-cache.conn.close()
-shutil.rmtree(td, ignore_errors=True)
+    print(f"正样本 {len(pos)} 张 / 负样本 {len(neg)} 张\n", flush=True)
+    tp = fn = fp = tn = 0
+    print("=== 正样本（应命中）===", flush=True)
+    for p, kind in pos:
+        r = af.analyze_file(p, cfg, cache, enable)
+        hit = r["verdict"] in ("ad", "suspect")
+        tp += hit; fn += (not hit)
+        mark = "✅" if hit else "❌漏检"
+        print(f"{mark} {kind:<16} {p.name:<24} {r['verdict']:<8} {r['score']:.0f} 分", flush=True)
+    print("\n=== 负样本（应判 clean）===", flush=True)
+    for p, kind in neg:
+        r = af.analyze_file(p, cfg, cache, enable)
+        ok = r["verdict"] == "clean"
+        tn += ok; fp += (not ok)
+        mark = "✅" if ok else "❌误报"
+        print(f"{mark} {kind:<16} {p.name:<24} {r['verdict']:<8} {r['score']:.0f} 分  {[h['label'][:20] for h in r['reasons']]}", flush=True)
+    recall = tp/len(pos)*100
+    spec = tn/len(neg)*100
+    print(f"\n召回率 {tp}/{len(pos)} = {recall:.1f}%   误报 {fp}/{len(neg)} = {100-spec:.1f}%   特异度 {spec:.1f}%", flush=True)
+finally:
+    if cache is not None:
+        cache.close()
+    af.CACHE_PATH, af.CONFIG_PATH, af.LOG_PATH, af.HISTORY_PATH = _orig_paths
+    shutil.rmtree(td, ignore_errors=True)
 sys.exit(1 if fn or fp else 0)

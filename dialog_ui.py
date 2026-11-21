@@ -5,7 +5,7 @@ from queue import Empty, SimpleQueue
 from threading import Thread
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel, QListWidget,
                                QPushButton, QScrollArea, QStackedWidget,
                                QVBoxLayout, QWidget)
@@ -65,9 +65,17 @@ class WorkbenchDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if self.parentWidget():
-            center = self.parentWidget().mapToGlobal(self.parentWidget().rect().center())
-            self.move(center.x() - self.width() // 2, center.y() - self.height() // 2)
+        parent = self.parentWidget()
+        if parent:
+            center = parent.mapToGlobal(parent.rect().center())
+            x = center.x() - self.width() // 2
+            y = center.y() - self.height() // 2
+            screen = parent.screen() or self.screen() or QGuiApplication.primaryScreen()
+            if screen is not None:
+                avail = screen.availableGeometry()
+                x = max(avail.left(), min(x, avail.right() - self.width() + 1))
+                y = max(avail.top(), min(y, avail.bottom() - self.height() + 1))
+            self.move(x, y)
 
 
 def section(title, description='', parent=None):
@@ -170,14 +178,20 @@ def style_dialog(dialog):
     dialog.content_scroll = scroll
     dialog.vBoxLayout.insertWidget(0, scroll, 1)
     dialog.vBoxLayout.insertWidget(0, header)
-    screen = dialog.screen()
-    available = screen.availableGeometry() if screen else dialog.parentWidget().geometry()
+    parent = dialog.parentWidget()
+    screen = (parent.screen() if parent else None) or dialog.screen() or QGuiApplication.primaryScreen()
+    if screen is not None:
+        available = screen.availableGeometry()
+    elif parent is not None:
+        available = parent.geometry()
+    else:
+        available = dialog.geometry()
     # 固定宽度由各窗口指定；桌面较窄时仍保留可操作边界。
-    width = min(dialog.width(), available.width() - 40)
+    width = max(320, min(dialog.width(), available.width() - 40))
     dialog.setMinimumWidth(width)
     dialog.setMaximumWidth(width)
     dialog.setMinimumHeight(0)
-    height = min(getattr(dialog, 'preferred_height', 660), available.height() - 48)
+    height = max(220, min(getattr(dialog, 'preferred_height', 660), available.height() - 48))
     dialog.setMaximumHeight(height)
     dialog.resize(width, height)
 
@@ -237,6 +251,8 @@ class AboutDialog(WorkbenchDialog):
                 results.put(update_check.check_latest(version))
             except update_check.UpdateCheckError as error:
                 results.put(error)
+            except Exception:
+                results.put(update_check.UpdateCheckError('检查更新时出现异常，请稍后重试。'))
 
         self._update_timer.start()
         Thread(target=fetch, daemon=True).start()

@@ -225,6 +225,92 @@ class ScanEngineTests(unittest.TestCase):
         self.assertTrue(errors)
         self.assertEqual(path.read_bytes(), original)
 
+    def test_quarantine_lock_reentrant_fixed_size_and_readonly_list(self):
+        missing = self.root / 'never-created'
+        self.assertEqual(af.list_quarantine(missing), [])
+        self.assertFalse(missing.exists())
+
+        qdir = self.root / 'locked-q'
+        for _ in range(5):
+            with af.quarantine_lock(qdir, timeout=1):
+                # 同线程嵌套重入不应自死锁
+                with af.quarantine_lock(qdir, timeout=0.2):
+                    pass
+        lock_file = qdir / '.ad-filter.lock'
+        self.assertTrue(lock_file.exists())
+        self.assertEqual(lock_file.stat().st_size, 1)
+
+    def test_drive_root_path_matching_and_default_quarantine_skip(self):
+        self.assertEqual(af._norm_root('D:\\'), 'D:\\')
+        self.assertTrue(af._path_is_within('d:\\Album\\pic.jpg', 'D:\\'))
+        self.assertFalse(af._path_is_within('D:\\ab\\pic.jpg', 'D:\\a'))
+        self.assertEqual(af._root_of('d:\\Album\\pic.jpg', ['D:\\', 'D:\\Album']), 'D:\\Album')
+        self.assertEqual(af._root_of('d:\\top.jpg', ['D:\\']), 'D:\\')
+
+        default_q = self.root / af.QUARANTINE_NAME
+        default_q.mkdir()
+        Image.new('RGB', (400, 300), (80, 90, 100)).save(default_q / 'inside.jpg')
+        self.assertEqual(af.gather_images([str(default_q)], copy.deepcopy(af.DEFAULT_CONFIG)), [])
+
+    def test_blank_long_banner_retains_shape_suspect_with_qr_ocr_enabled(self):
+        strip_img = self.root / 'plain_strip.png'
+        Image.new('RGB', (1600, 80), (240, 240, 240)).save(strip_img)
+        cfg = copy.deepcopy(af.DEFAULT_CONFIG)
+        with af.Cache(self.root / 'blank.db') as cache:
+            cache.check_config_version(cfg, {'filename': True, 'shape': True, 'qr': True, 'ocr': True})
+            result = af.analyze_file(strip_img, cfg, cache, {'filename': True, 'shape': True, 'qr': True, 'ocr': True})
+        self.assertEqual(result['verdict'], 'suspect')
+        self.assertEqual(result['score'], 30)
+
+    def test_load_display_image_tolerates_corrupt_exif(self):
+        photo = self.root / 'bad_exif.jpg'
+        Image.new('RGB', (120, 80), (60, 120, 180)).save(photo)
+        with patch.object(Image.Image, 'getexif', side_effect=OSError('corrupt exif')):
+            image, original = af.load_display_image(photo, max_dim=100)
+        self.assertEqual(original, (120, 80))
+        self.assertLessEqual(max(image.size), 100)
+
+    def test_normalize_config_rejects_bad_regex_and_invalid_quarantine_paths(self):
+        with self.assertRaises(Exception):
+            af.normalize_config({'filename_rules': [{'pattern': '([bad', 'label': 'x'}]})
+        with self.assertRaises(ValueError):
+            af.normalize_config({'quarantine_dir': 'relative/path'})
+        with self.assertRaises(ValueError):
+            af.normalize_config({'quarantine_dir': 'C:\\bad\x00dir'})
+
+    def test_recycle_delete_cluster_dedup_and_history_keep_zero(self):
+        import types
+        a = self.root / 'del_a.jpg'
+        b = self.root / 'rec_b.jpg'
+        Image.new('RGB', (400, 300), (10, 20, 30)).save(a)
+        Image.new('RGB', (400, 300), (40, 50, 60)).save(b)
+        missing = self.root / 'missing.jpg'
+
+        trashed = []
+        fake_mod = types.SimpleNamespace(send2trash=lambda p: trashed.append(p))
+        with patch.dict(sys.modules, {'send2trash': fake_mod}):
+            moved, errors, ok = af.apply_recycle([{'path': str(b)}], lambda _: None)
+        self.assertEqual((moved, errors, ok), (1, [], [str(b)]))
+        self.assertEqual(trashed, [str(b)])
+
+        moved, errors, ok = af.apply_delete([{'path': str(a)}, {'path': str(missing)}], lambda _: None)
+        self.assertEqual((moved, ok), (1, [str(a)]))
+        self.assertEqual(len(errors), 1)
+        self.assertFalse(a.exists())
+
+        # 重复路径不应自成相似组
+        self.assertEqual(af.cluster_similar([str(b), str(b)], threshold=6), [])
+
+        orig_hist = af.HISTORY_PATH
+        try:
+            af.HISTORY_PATH = self.root / 'hist.json'
+            af.append_history({'total': 1}, keep=10)
+            self.assertEqual(len(af.load_history()), 1)
+            af.append_history({'total': 2}, keep=0)
+            self.assertEqual(af.load_history(), [])
+        finally:
+            af.HISTORY_PATH = orig_hist
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
