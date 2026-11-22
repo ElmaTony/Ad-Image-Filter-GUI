@@ -21,6 +21,11 @@ $exe = Join-Path $projectRoot '广告图过滤.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw '请先执行 scripts/build.ps1。' }
 Assert-ExeVersion $exe $version
 $notes = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $NotesFile))
+$firstNotesLine = ($notes -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+$expectedNotesHeader = "# Ad-Image-Filter-GUI $releaseTag"
+if (-not $firstNotesLine -or $firstNotesLine.Trim() -cne $expectedNotesHeader) {
+    throw "发行说明首行表头必须为 $expectedNotesHeader。"
+}
 $previousPrompt = $env:GIT_TERMINAL_PROMPT
 $previousInteractive = $env:GCM_INTERACTIVE
 Push-Location $projectRoot
