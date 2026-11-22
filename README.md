@@ -1,5 +1,7 @@
 # 广告图过滤
 
+简体中文 | [English](README.en.md)
+
 面向 Windows 的纯本地相册广告图批量筛查与人工审查工具。自动识别本地图片中的引流广告、推广水印、二维码与异常横幅，将命中结果集中到审查工作台，由你快速核对并安全处置。
 
 [下载最新版](https://github.com/ElmaTony/Ad-Image-Filter-GUI/releases/latest) · [查看全部发行版](https://github.com/ElmaTony/Ad-Image-Filter-GUI/releases) · [更新说明](RELEASE_NOTES.md) · [功能清单](FEATURE_INVENTORY.md)

@@ -21,6 +21,9 @@ if (-not $notes) { throw '请填写发行说明。' }
 if ($notes -match '(?m)^\s*#\s+' -or $notes -match '(?m)^\s*\d{4}-\d{2}-\d{2}\s*$') {
     throw '发行说明正文直接写更新要点，不要包含一级标题或单独日期行。'
 }
+if ($notes -notmatch '[\u4e00-\u9fff]' -or $notes -notmatch '[A-Za-z]{4,}' -or $notes -notmatch '(?m)^\s*---\s*$') {
+    throw '发行说明正文须包含中英文双语要点，并使用 --- 分隔。'
+}
 $previousPrompt = $env:GIT_TERMINAL_PROMPT
 $previousInteractive = $env:GCM_INTERACTIVE
 Push-Location $projectRoot
