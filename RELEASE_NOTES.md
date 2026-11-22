@@ -1,4 +1,4 @@
-# Ad-Image-Filter-GUI v1.5.1
+# 文档更新
 
 2026-11-21
 

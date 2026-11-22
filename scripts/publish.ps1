@@ -1,6 +1,6 @@
 ﻿param(
     [string]$Tag,
-    [Parameter(Mandatory)][string]$Title,
+    [string]$Title,
     [Parameter(Mandatory)][string]$NotesFile,
     [ValidateRange(1, 86400)][int]$UploadTimeoutSec = 3600
 )
@@ -10,22 +10,13 @@ $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $version = Get-AppVersion $projectRoot
 $releaseTag = "v$version"
 if ($Tag -and $Tag -cne $releaseTag) { throw "标签必须与 VERSION 一致（$releaseTag）。" }
-$releaseTitle = $Title.Trim()
-if (-not $releaseTitle) { throw '请填写发行标题。' }
-if ($releaseTitle -match '^v[0-9]') {
-    if (($releaseTitle -split '\s+', 2)[0] -cne $releaseTag) { throw "标题中的版本必须为 $releaseTag。" }
-} else {
-    $releaseTitle = "$releaseTag $releaseTitle"
-}
+$expectedTitle = "Ad Image Filter GUI $releaseTag"
+$releaseTitle = if ($Title) { $Title.Trim() } else { $expectedTitle }
+if ($releaseTitle -cne $expectedTitle) { throw "发行标题必须为 $expectedTitle。" }
 $exe = Join-Path $projectRoot '广告图过滤.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw '请先执行 scripts/build.ps1。' }
 Assert-ExeVersion $exe $version
 $notes = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $NotesFile))
-$firstNotesLine = ($notes -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
-$expectedNotesHeader = "# Ad-Image-Filter-GUI $releaseTag"
-if (-not $firstNotesLine -or $firstNotesLine.Trim() -cne $expectedNotesHeader) {
-    throw "发行说明首行表头必须为 $expectedNotesHeader。"
-}
 $previousPrompt = $env:GIT_TERMINAL_PROMPT
 $previousInteractive = $env:GCM_INTERACTIVE
 Push-Location $projectRoot

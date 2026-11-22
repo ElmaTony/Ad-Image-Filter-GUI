@@ -167,7 +167,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 4. 验证打包产物并提交源码后，运行发布脚本（核对版本、推送标签与源码、创建 GitHub Release 并上传附件）：
 
 ```powershell
-.\scripts\publish.ps1 -Title '本次更新标题' -NotesFile RELEASE_NOTES.md
+.\scripts\publish.ps1 -NotesFile RELEASE_NOTES.md
 ```
 
 更多交付、版本与测试约定见 [AGENTS.md](AGENTS.md)。
