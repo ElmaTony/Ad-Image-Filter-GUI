@@ -1,139 +1,166 @@
-# 广告图过滤
+<div align="center">
 
-简体中文 | [English](README.en.md)
+<img src="assets/icon.png" width="84" height="84" alt="广告图过滤图标" />
 
-面向 Windows 的纯本地相册广告图批量筛查与人工审查工具。自动识别本地图片中的引流广告、推广水印、二维码与异常横幅，将命中结果集中到审查工作台，由你快速核对并安全处置。
+# 广告图过滤 · Ad Image Filter GUI
 
-[下载最新版](https://github.com/ElmaTony/Ad-Image-Filter-GUI/releases/latest) · [查看全部发行版](https://github.com/ElmaTony/Ad-Image-Filter-GUI/releases) · [更新说明](RELEASE_NOTES.md) · [功能清单](FEATURE_INVENTORY.md)
+**面向 Windows 的纯本地相册广告图批量筛查与人工审查工作台**
 
-![广告图过滤审查工作台](docs/screenshots/workbench-light.png)
+<p>
+  <a href="https://github.com/ElmaTony/Ad-Image-Filter-GUI/releases/latest">
+    <img src="https://img.shields.io/badge/Release-Windows%20x64-C25937?style=flat-square" alt="Windows x64 Release" />
+  </a>
+  <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-26231F?style=flat-square" alt="Windows 10/11" />
+  <img src="https://img.shields.io/badge/Python-3.10%2B%20%C2%B7%20PySide6-2B6CB0?style=flat-square" alt="Python 3.10+ PySide6" />
+  <img src="https://img.shields.io/badge/Privacy-100%25%20%E6%9C%AC%E5%9C%B0%E7%A6%BB%E7%BA%BF-2F855A?style=flat-square" alt="100% Local Offline" />
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-6A645B?style=flat-square" alt="MIT License" />
+  </a>
+</p>
 
----
+<p>
+  <strong>简体中文</strong> · <a href="README.en.md">English</a>
+</p>
 
-## 核心亮点
+<p>
+  <a href="https://github.com/ElmaTony/Ad-Image-Filter-GUI/releases/latest">下载最新版</a> ·
+  <a href="#核心特性">核心特性</a> ·
+  <a href="#快速上手">快速上手</a> ·
+  <a href="#外观与视图">外观与视图</a> ·
+  <a href="#识别引擎">识别引擎</a> ·
+  <a href="#开发者指南">开发者指南</a>
+</p>
 
-- **纯本地离线识别**：文件名规则、图片形状、二维码解码、OCR 文字识别与相似图分组全部在本机完成，不上传任何图片或目录信息。
-- **四路独立检测 + 相似图聚合**：按需开关各识别通道，支持白名单优先放行、推广词权重计分与 dHash 相似图分组（`⟲N`）。
-- **高密度审查工作台**：支持多主题色盘、浅/深外观切换、三档卡片网格密度、大图 Lightbox 快捷核对与 `Ctrl+K` 命令面板。
-- **安全可逆处置**：默认移入可恢复的隔离区，支持一键「撤销处置」、隔离区浏览与指定还原，也可选择移至系统回收站或永久删除。
+<br />
 
----
+<img src="docs/screenshots/workbench-light.png" width="900" alt="广告图过滤审查工作台预览" />
 
-## 下载、安装与更新
-
-### 直接运行（推荐）
-
-适用于 **Windows 10 / 11（64 位）**：
-
-1. 前往 [Releases 页面](https://github.com/ElmaTony/Ad-Image-Filter-GUI/releases/latest) 下载 `AdImageFilter-Windows-x64.exe`（单文件免安装，可直接运行）。
-   > 当前仓库为私有仓库，下载前请使用具备访问权限的 GitHub 账号登录。
-2. 将 EXE 放在任意固定目录后双击启动；配置、缓存、历史与日志会自动保存在程序同目录中。
-
-### 检查与升级版本
-
-- **应用内检查**：点击顶部「关于 → 检查更新」（窄窗口下为「更多 → 关于」）。发现新版本时，弹窗会展示版本号与发行页链接，点击后由浏览器打开，下载与替换完全由你手动完成。
-- **保留现有配置升级**：先关闭旧版程序，再用新下载的 EXE 替换原目录中的旧文件即可沿用配置、缓存与历史。
-- **核对版本号**：可在「关于」窗口一键复制版本号，或在 EXE 右键「属性 → 详细信息」中查看文件版本与产品版本。
-- **私有仓库鉴权**：检查更新会自动复用系统 Git 凭据助手中已保存的 GitHub 登录；也可在启动前设置环境变量 `ADFILTER_GITHUB_TOKEN`（仅需本仓库 **Contents 只读** 权限）。无可用凭据时，弹窗会直接提供 GitHub 发行页链接。
-
----
-
-## 使用流程
-
-1. **添加文件夹**
-   点击「添加文件夹」或直接将目录拖入窗口，支持一次添加多个目录。扫描时递归读取 `JPG`、`JPEG`、`PNG`、`WebP`、`BMP`、`GIF`，并自动跳过隔离区目录。
-2. **开始扫描与筛选**
-   - 扫描过程中可随时暂停、继续或取消；本地 SQLite 缓存会记住已扫结果，下次复用大幅提速（仅在检测规则或开关变化时自动失效，切换主题或网格密度不会触发重扫）。
-   - 按「全部待审 / 广告 / 疑似 / 异常」标签、命中原因或文件路径关键字筛选，并支持 5 种排序（默认、文件名、文件大小、修改时间、风险得分）。
-   - 筛选栏右侧可一键切换卡片密度（`密 / 中 / 大`），点选卡片打开详情面板查看命中理由与完整 OCR 文本，双击或按 `Enter` 打开大图 Lightbox。
-3. **核对与跨筛选勾选**
-   - 勾选或使用详情/大图中的「标记广告」可将图片加入待处置集合；「本次保留」仅移出本轮审查结果，不会修改原文件。
-   - 切换分类或筛选条件时，已勾选项目保持选中不丢失；点击「查看已选」可集中核对包括当前筛选外隐藏项在内的全部待处置图片。
-4. **安全处置与恢复**
-   - 底部栏支持三种处置方式：**隔离**（默认，移入可恢复目录）、**回收站**（交给 Windows 回收站）、**删除**（永久移除）。执行前会弹出确认摘要，列出总数、占用空间及筛选外隐藏勾选项数量。
-   - 默认隔离区位于首个扫描目录所在磁盘根目录的 `_广告隔离`，可在「设置 → 隔离与配置」自定义位置。
-   - 隔离后可点击「撤销处置」一键恢复上一批次文件；也可打开「隔离区」查看各批次记录、按需单独还原、永久清理，或切换查看历史旧隔离目录。
+</div>
 
 ---
 
-## 外观、主题与网格密度
+## 核心特性
 
-软件内置统一多主题引擎，每套主题均完整适配浅色与深色模式，并支持平滑切换动画。
-
-### 内置主题色盘
-
-| 主题名称 | 风格说明 | 默认状态 |
-| --- | --- | --- |
-| **宣纸暖陶 2.0** | 温和暖纸底搭配收敛陶土橙，层次清爽不发黄 | 默认 |
-| **石墨画廊** | 冷中性灰阶搭配克制钴蓝，零色偏专业看图 | 可选 |
-| **翠影青瓷** | 雾灰白 / 深松烟搭配鼠尾草青绿，低疲劳护眼 | 可选 |
-| **极夜暗房** | 高对比暗房阶梯，图文边界锐利分明 | 可选 |
-
-### 三档卡片密度
-
-| 密度档位 | 快捷标签 | 说明 | 默认状态 |
-| --- | --- | --- | --- |
-| **紧凑** | `密` | 更高同屏密度，单屏快速扫图 | 默认 |
-| **标准** | `中` | 均衡缩略图尺寸并展示命中摘要 | 可选 |
-| **大图** | `大` | 更大预览面积，适合细节核对 | 可选 |
-
-> **切换入口**：右上筛选栏（密度切换）、标题栏/工具栏（浅深外观）、**设置 → 外观与主题**（主题色盘 / 浅深模式 / 网格密度），或按 `Ctrl+K` 在命令面板中一键切换。
+<table>
+  <tr>
+    <td width="50%">
+      <strong>🔍 四路独立本地识别</strong><br />
+      文件名正则与白名单、图片长宽比/分辨率检测、OpenCV + pyzbar 二维码解码、RapidOCR 本地文字识别，按需独立开关。
+    </td>
+    <td width="50%">
+      <strong>🖼️ 高密度审查工作台</strong><br />
+      支持 4 套主题色盘、浅/深外观、3 档卡片网格密度、相似图分组（<code>⟲N</code>）、全屏 Lightbox 核对与 <code>Ctrl+K</code> 命令面板。
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <strong>🛡️ 安全可逆的文件处置</strong><br />
+      默认移入可恢复隔离区，支持一键「撤销处置」、隔离区浏览与单文件还原；也可按需切换系统回收站或永久删除。
+    </td>
+    <td width="50%">
+      <strong>🔒 纯本地零上传隐私保护</strong><br />
+      图片解码、OCR 推理与缓存计算全部在本机完成，配置与缓存随程序便携存放，绝不上传图片或目录记录。
+    </td>
+  </tr>
+</table>
 
 ---
 
-## 识别引擎与规则管理
+## 快速上手
 
-四路识别通道可在「设置」中独立启用或关闭，互不干扰：
+### 下载与运行
 
-| 识别通道 | 识别方式与说明 | 默认状态 |
-| --- | --- | --- |
+适用于 **Windows 10 / 11（64 位）**，单文件免安装：
+
+1. 前往 [GitHub Releases](https://github.com/ElmaTony/Ad-Image-Filter-GUI/releases/latest) 下载 `AdImageFilter-Windows-x64.exe`（私有仓库需先登录有权限的 GitHub 账号）。
+2. 将 EXE 放入任意固定目录后双击运行，配置、缓存与日志会自动保存在程序同目录中。
+3. 升级时关闭旧程序，用新版 EXE 覆盖原文件即可保留全部规则、缓存与扫描历史。
+
+> [!TIP]
+> **应用内检查更新**：在主窗口打开 **关于 → 检查更新**（窄窗口为 **更多 → 关于**），发现新版后会展示版本号与发行页链接，下载与替换完全由你手动确认。私有仓库自动复用系统 Git 凭据助手登录，或读取环境变量 `ADFILTER_GITHUB_TOKEN`（仅需本仓库 **Contents 只读** 权限，不会落盘保存）。
+
+### 四步完成清理
+
+| 步骤 | 操作 | 核心细节 |
+| :---: | --- | --- |
+| **1** | **添加文件夹** | 点击「添加文件夹」或直接拖入窗口，支持多目录递归扫描 `JPG / JPEG / PNG / WebP / BMP / GIF`，自动跳过隔离区 |
+| **2** | **扫描与筛选** | 扫描中随时暂停/继续/取消；SQLite 本地缓存加速复扫；支持按分类（全部待审/广告/疑似/异常）、命中原因、路径与 5 种排序筛选 |
+| **3** | **核对与勾选** | 点选详情查看规则得分与完整 OCR 文本，双击或按 `Enter` 打开大图核对；跨筛选保留勾选，「查看已选」集中复核隐藏项 |
+| **4** | **处置与恢复** | 支持 **隔离**（默认）/ **回收站** / **删除**；执行前展示总数、体积与筛选外勾选项；支持一键「撤销处置」与自定义/旧隔离区还原 |
+
+---
+
+## 外观与视图
+
+内置统一多主题引擎，所有色盘均完整适配 **浅色 / 深色** 双外观并支持平滑切换动画；在筛选栏右侧、**设置 → 外观与主题** 或命令面板（`Ctrl+K`）中即可一键切换。
+
+| 主题色盘 | 主色调 | 风格定位 | 状态 |
+| --- | :---: | --- | :---: |
+| **宣纸暖陶 2.0** | `#C25937` | 温和暖纸底搭配收敛陶土橙，层次清爽不发黄 | 默认 |
+| **石墨画廊** | `#2563EB` | 冷中性灰阶搭配克制钴蓝，零色偏专业看图 | 可选 |
+| **翠影青瓷** | `#0F766E` | 雾灰白 / 深松烟搭配鼠尾草青绿，低疲劳护眼 | 可选 |
+| **极夜暗房** | `#18181B` | 高对比暗房阶梯，图文边界锐利分明 | 可选 |
+
+**三档卡片网格密度**：`紧凑（密 · 默认）` 适合单屏高速扫图 · `标准（中）` 均衡展示缩略图与命中摘要 · `大图（大）` 放大预览便于细节复核。
+
+---
+
+## 识别引擎
+
+各识别通道可在「设置」中独立开关；配合 **dHash 相似图分组**（`⟲N` 徽标，支持一键勾选整组）、**规则测试器**、**JSON 配置导入/导出**、**CSV 报表导出** 与 **最近 100 条扫描历史** 使用。
+
+| 通道 | 判定机制 | 默认 |
+| --- | --- | :---: |
 | **文件名与白名单** | 正则匹配渠道名、推广词与 `@渠道号`；白名单规则优先放行 | 开启 |
-| **图片形状** | 仅读取图片头尺寸，将极端横条或过小分辨率标记待人工复核 | 开启 |
-| **二维码** | OpenCV + pyzbar 本地解码；含链接判为广告，普通文本码或结构可信但无法解码的码列为疑似 | 开启 |
-| **OCR 文字** | RapidOCR 本地模型；优先裁切上下条带并支持提亮增强以识别半透明水印，必要时补扫全图并按词库权重计分 | 关闭（可按需开启） |
+| **图片形状** | 仅读取图片头尺寸，标记极端长宽比横幅或过小分辨率待复核 | 开启 |
+| **二维码** | OpenCV + pyzbar 本地解码；链接判为广告，文本码或结构可信但未解码的码列为疑似 | 开启 |
+| **OCR 文字** | RapidOCR 本地推理；优先裁切上下条带并提亮增强以识别半透明水印，必要时补扫全图并按词库权重计分 | 关闭 |
 
-### 配套审查工具
+<details>
+<summary><strong>⌨️ 快捷键速查（主工作台 &amp; 大图查看器）</strong></summary>
 
-- **相似图分组（dHash）**：自动聚合重复或多次转发的同一图片，卡片右下角显示 `⟲N` 徽标，支持一键勾选整组相似图。
-- **规则测试器**：在「规则」弹窗中输入示例文件名或 OCR 文本实时试算命中结果与得分，验证无误后再保存。
-- **配置与数据导出**：支持将规则与设置导入/导出为 JSON，将当前筛选结果导出为 CSV 报表，并在「历史」窗口回看最近 100 条扫描记录。
+<br />
 
----
-
-## 快捷键速查
-
-| 场景 | 快捷键 | 操作 |
+| 场景 | 快捷键 | 功能 |
 | --- | --- | --- |
 | 主工作台 | `Space` | 勾选或取消当前图片 |
-| 主工作台 | `Enter` | 打开大图查看（Lightbox） |
+| 主工作台 | `Enter` | 打开大图查看器（Lightbox） |
 | 主工作台 | `Ctrl+A` | 切换当前筛选范围内的全选 |
-| 主工作台 | `Ctrl+K` | 打开或关闭命令面板 |
+| 主工作台 | `Ctrl+K` | 打开 / 关闭命令面板 |
 | 主工作台 | `Delete` | 打开当前勾选项的处置确认弹窗 |
-| 大图查看 | `←` / `→` | 切换上一张 / 下一张 |
-| 大图查看 | 滚轮 / 拖拽 / 双击 | 缩放、平移画布、重置视图 |
-| 大图查看 | `F` | 切换纯净查看模式（隐藏悬浮工具栏） |
-| 大图查看 | `A` / `K` | 标记广告 / 本次保留 |
-| 大图查看 | `Esc` | 关闭大图 |
+| 大图查看器 | `←` / `→` | 上一张 / 下一张 |
+| 大图查看器 | 滚轮 / 拖拽 / 双击 | 缩放、平移画布、重置视图 |
+| 大图查看器 | `F` | 切换纯净查看模式（隐藏悬浮工具栏） |
+| 大图查看器 | `A` / `K` | 标记广告 / 本次保留 |
+| 大图查看器 | `Esc` | 关闭大图查看器 |
 
----
+</details>
 
-## 隐私、本地数据与联网说明
+<details>
+<summary><strong>🔒 本地数据文件与联网范围说明</strong></summary>
 
-- **完全离线分析**：所有图片解码、二维码识别、OCR 推理与相似图计算均在本机执行，不会将图片、文件名、OCR 文本或目录路径发送到任何服务器。
-- **便携本地存储**：所有运行数据保存在 EXE（或源码脚本）同级目录：
-  - `ad_filter_config.json`：规则、外观主题、密度与偏好设置
-  - `ad_filter_cache.db`：本地 SQLite 扫描缓存
-  - `ad_filter_history.json`：最近扫描历史记录
+<br />
+
+- **纯离线分析**：图片解码、二维码、OCR 与相似图计算均在本机完成，不向外部发送任何图片、文本或目录路径。
+- **便携数据存储**（位于 EXE 或源码同级目录）：
+  - `ad_filter_config.json`：识别规则、主题色盘、网格密度与偏好设置
+  - `ad_filter_cache.db`：本地 SQLite 扫描缓存（仅规则/开关变更时自动失效，切换主题或密度不触发重扫）
+  - `ad_filter_history.json`：最近 100 条扫描历史
   - `ad_filter_log.jsonl`：操作与处置日志
-- **最小化联网范围**：软件仅在你主动点击「检查更新」时向 GitHub 查询发行版元数据；更新检查不会持久化任何访问令牌。
+- **最小化联网**：仅在主动点击「检查更新」时请求 GitHub Release 元数据，不保存访问令牌。
+
+</details>
 
 ---
 
 ## 开发者指南
 
-### 环境要求与源码运行
+需要 **Windows 10 / 11（64 位）** 与 **Python 3.10+**。更多文档见 [功能清单](FEATURE_INVENTORY.md)、[更新说明](RELEASE_NOTES.md)、[测试约定](tests/README.md) 与 [交付规范](AGENTS.md)。
 
-需要 **Windows 10 / 11（64 位）** 与 **Python 3.10+**。在仓库根目录执行：
+<details>
+<summary><strong>🛠️ 从源码运行与 CLI 调试命令</strong></summary>
+
+<br />
 
 ```powershell
 python -m venv .venv
@@ -141,60 +168,65 @@ python -m venv .venv
 .\.venv\Scripts\python.exe ad_filter.py
 ```
 
-### 命令行工具与测试
-
-`ad_filter.py` 内置多种调试与验证入口：
-
-| 命令 | 说明 |
+| 命令 | 用途 |
 | --- | --- |
 | `.\.venv\Scripts\python.exe ad_filter.py --selftest` | 无界面运行识别引擎、缓存与隔离逻辑自测 |
-| `.\.venv\Scripts\python.exe ad_filter.py --gui-test` | 在独立临时目录中运行完整 GUI 功能回归测试 |
+| `.\.venv\Scripts\python.exe ad_filter.py --gui-test` | 在独立临时目录运行完整 GUI 回归测试 |
 | `.\.venv\Scripts\python.exe ad_filter.py --smoke` | GUI 冒烟启动测试（3 秒后自动退出，不写用户数据） |
 | `.\.venv\Scripts\python.exe ad_filter.py --bench` | 运行识别引擎性能基准 |
 | `.\.venv\Scripts\python.exe ad_filter.py --make-fixtures` | 生成合成测试样本到 `testdata/` |
 
-无头环境下运行 GUI 或回归脚本前，请设置 `$env:QT_QPA_PLATFORM = 'offscreen'`。完整的测试套件与临时目录隔离约定见 [tests/README.md](tests/README.md)。
+> 无头环境运行 GUI 测试前请先执行 `$env:QT_QPA_PLATFORM = 'offscreen'`。
 
-### 打包与发布
+</details>
 
-1. 按语义化版本更新根目录 [VERSION](VERSION)（不带 `v` 前缀，如 `1.5.1`）；软件「关于」、EXE 文件/产品版本、GitHub 发行标签与标题均由此统一读取生成。
-2. 更新面向普通用户的简短发行说明 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
-3. 安装构建依赖并打包单文件 EXE（自动生成根目录 `广告图过滤.exe` 并清理 `build/`、`dist/`、`.spec`）：
+<details>
+<summary><strong>📦 打包单文件 EXE 与发布流程</strong></summary>
+
+<br />
+
+1. 更新根目录 [VERSION](VERSION)（三段语义化数字，如 `1.5.1`），软件「关于」、EXE 文件/产品版本、GitHub 标签与标题均由此统一生成。
+2. 在 [RELEASE_NOTES.md](RELEASE_NOTES.md) 中填写简短的用户向中英双语要点（使用 `---` 分隔，不写一级标题和日期行）。
+3. 安装构建依赖并打包单文件 EXE（生成根目录 `广告图过滤.exe`，自动清理 `build/`、`dist/` 与 `.spec`）：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
 powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 ```
 
-4. 验证打包产物并提交源码后，运行发布脚本（核对版本、推送标签与源码、创建 GitHub Release 并上传附件）：
+4. 验证打包产物并提交源码后，运行发布脚本：
 
 ```powershell
 .\scripts\publish.ps1 -NotesFile RELEASE_NOTES.md
 ```
 
-更多交付、版本与测试约定见 [AGENTS.md](AGENTS.md)。
+</details>
 
----
+<details>
+<summary><strong>🗂️ 项目目录结构</strong></summary>
 
-## 项目结构概览
+<br />
 
 ```text
 ad-filter-gui/
-├── ad_filter.py          # 扫描引擎、四路识别、dHash 分组、SQLite 缓存、隔离/撤销与 CLI 入口
+├── ad_filter.py          # 扫描引擎、四路识别、dHash 分组、SQLite 缓存、隔离/撤销与 CLI
 ├── ad_filter_gui.py      # 主窗口控制器、交互逻辑、快捷键、命令面板与 --gui-test
 ├── workbench_ui.py       # 审查工作台布局、筛选条、卡片委托（CardDelegate）与密度切换
 ├── dialog_ui.py          # 设置、规则测试器、隔离区、历史、关于与确认弹窗
 ├── cds_tokens.py         # 统一多主题色盘与三档密度视觉令牌
-├── cds_widgets.py        # 自定义主题感知控件（命令面板、Toast、Badge、Segmented 等）
+├── cds_widgets.py        # 主题感知自定义控件（CommandPalette、Toast、Badge、Segmented 等）
 ├── cds_layouts.py        # 响应式流式布局组件
 ├── update_check.py       # GitHub Release 元数据检查与版本比较
 ├── scripts/              # 打包（build.ps1）、发布（publish.ps1）与版本同步脚本
 ├── tests/                # 单元测试、UI 审计与端到端回归测试套件
-└── docs/screenshots/     # 文档展示截图
+├── assets/               # 应用图标资源
+└── docs/screenshots/     # 文档预览截图
 ```
+
+</details>
 
 ---
 
-## 许可证
-
-本项目基于 [MIT License](LICENSE) 开源。
+<div align="center">
+  基于 <a href="LICENSE">MIT License</a> 开源
+</div>
