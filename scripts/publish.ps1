@@ -16,7 +16,11 @@ if ($releaseTitle -cne $expectedTitle) { throw "发行标题必须为 $expectedT
 $exe = Join-Path $projectRoot '广告图过滤.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw '请先执行 scripts/build.ps1。' }
 Assert-ExeVersion $exe $version
-$notes = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $NotesFile))
+$notes = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $NotesFile)).Trim()
+if (-not $notes) { throw '请填写发行说明。' }
+if ($notes -match '(?m)^\s*#\s+' -or $notes -match '(?m)^\s*\d{4}-\d{2}-\d{2}\s*$') {
+    throw '发行说明正文直接写更新要点，不要包含一级标题或单独日期行。'
+}
 $previousPrompt = $env:GIT_TERMINAL_PROMPT
 $previousInteractive = $env:GCM_INTERACTIVE
 Push-Location $projectRoot
