@@ -311,6 +311,63 @@ class ScanEngineTests(unittest.TestCase):
         finally:
             af.HISTORY_PATH = orig_hist
 
+    def test_bright_stroke_mask_and_dilate_match_pillow_reference(self):
+        import numpy as np
+        from PIL import ImageFilter
+        rng = np.random.default_rng(2026)
+        arr = rng.integers(0, 256, size=(120, 160, 3), dtype=np.uint8)
+        arr[10:25, 20:80] = 245  # 高亮低饱和笔画块，确保超过 0.05% 门控
+        reg = Image.fromarray(arr)
+        hsv = np.asarray(reg.convert('HSV'))
+        for thr in (200, 170, 0):
+            ref_mask = (hsv[:, :, 2] >= thr) & (hsv[:, :, 1] <= 70)
+            fast_mask, _, _ = af._bright_stroke_mask(arr, thr)
+            self.assertIsNotNone(fast_mask)
+            self.assertTrue(np.array_equal(ref_mask, fast_mask))
+            ref_img = Image.fromarray(np.where(ref_mask, 0, 255).astype('uint8')).convert('RGB').filter(ImageFilter.MaxFilter(3))
+            fast_img = af._bright_from_mask(fast_mask).convert('RGB')
+            self.assertTrue(np.array_equal(np.asarray(ref_img), np.asarray(fast_img)))
+        # 全暗图：低于 0.05% 门控直接返回 None
+        dark = np.zeros((100, 100, 3), dtype=np.uint8)
+        mask_none, _, _ = af._bright_stroke_mask(dark, 200)
+        self.assertIsNone(mask_none)
+
+    def test_single_open_preserves_error_labels_and_skips_decode_on_small_shape(self):
+        bad = self.root / 'corrupt.jpg'
+        bad.write_bytes(b'not an image')
+        r_shape = af.analyze_file(bad, self.cfg, self.cache, dict(filename=False, shape=True, qr=True, ocr=False))
+        self.assertEqual(r_shape['verdict'], 'error')
+        self.assertTrue(r_shape['reasons'][0]['label'].startswith('读取失败'))
+        r_decode = af.analyze_file(bad, self.cfg, self.cache, dict(filename=False, shape=False, qr=True, ocr=False))
+        self.assertEqual(r_decode['verdict'], 'error')
+        self.assertTrue(r_decode['reasons'][0]['label'].startswith('解码失败'))
+
+        tiny = self.root / 'tiny.png'
+        Image.new('RGB', (120, 120), (80, 90, 100)).save(tiny)
+        with patch.object(af, 'decode_qr_texts', side_effect=AssertionError('should not decode pixels')):
+            r_tiny = af.analyze_file(tiny, self.cfg, self.cache, dict(filename=False, shape=True, qr=True, ocr=False))
+        self.assertEqual((r_tiny['verdict'], r_tiny['score']), ('suspect', 20))
+
+    def test_batch_hash_cache_and_parallel_cluster_similar_equivalence(self):
+        imgs = []
+        base = Image.new('RGB', (480, 360), (40, 80, 120))
+        ImageDraw.Draw(base).rectangle((60, 60, 300, 240), fill=(230, 180, 70))
+        for i in range(6):
+            p = self.root / f'sim_{i}.png'
+            if i < 4:
+                base.save(p)
+            else:
+                Image.new('RGB', (480, 360), (i * 30, 200 - i * 20, 90)).save(p)
+            imgs.append(str(p))
+        ref_groups = af.cluster_similar(imgs, threshold=6, cache=None)
+        cached_groups_1 = af.cluster_similar(imgs, threshold=6, cache=self.cache)
+        cached_groups_2 = af.cluster_similar(imgs, threshold=6, cache=self.cache)
+        self.assertEqual(ref_groups, cached_groups_1)
+        self.assertEqual(ref_groups, cached_groups_2)
+        self.cache.put_hashes_batch([('high_bit', 10, 2.0, (1 << 64) - 3)])
+        self.cache.commit()
+        self.assertEqual(self.cache.get_hashes_batch([('high_bit', 10, 2.0)]), {'high_bit': (1 << 64) - 3})
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

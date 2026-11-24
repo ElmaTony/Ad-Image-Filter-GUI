@@ -543,10 +543,11 @@ class FolderBar(QWidget):
         self._chips.clear()
         roots = self.app.get_roots()
         for r in roots:
-            name = Path(r).name or r
+            norm_r = af._norm_root(r)
+            name = Path(norm_r).name or norm_r
             chip = FolderChip(str(r), name, self.app, self)
             self._box.addWidget(chip)
-            self._chips[str(Path(r)).rstrip("\\/")] = chip
+            self._chips[norm_r] = chip
         if not roots:
             hint = QLabel("未添加文件夹 —— 点左上「添加文件夹」或把文件夹拖进窗口", self)
             hint.setObjectName("folderHint")
@@ -622,10 +623,13 @@ class FolderBar(QWidget):
                     table.setCellWidget(row, 2, actions)
                     table.setRowHeight(row, 36)
             busy = self.app._scan_running() or self.app._disposing or self.app._file_busy
+            totals_ci = {os.path.normcase(af._norm_root(k)): v for k, v in self.app._folder_totals.items()}
+            done_ci = {os.path.normcase(af._norm_root(k)): v for k, v in self.app._folder_done.items()}
             for row, (path, button) in enumerate(zip(paths, dialog.remove_buttons)):
-                key = str(Path(path)).rstrip('\\/')
-                total = self.app._folder_totals.get(key)
-                count = self.app._folder_done.get(key, 0)
+                key = af._norm_root(path)
+                key_ci = os.path.normcase(key)
+                total = self.app._folder_totals.get(key, totals_ci.get(key_ci))
+                count = self.app._folder_done.get(key, done_ci.get(key_ci, 0))
                 table.item(row, 1).setText('待扫描' if total is None else
                     (f'✓ {total}/{total}' if count >= total else f'{count}/{total}'))
                 button.setEnabled(not busy)
@@ -672,11 +676,14 @@ class FolderBar(QWidget):
 
         totals = self.app._folder_totals
         done = self.app._folder_done
-        cur_root = af._norm_root(self.app._current_root) if getattr(self.app, "_current_root", None) else None
+        totals_ci = {os.path.normcase(af._norm_root(k)): v for k, v in totals.items()}
+        done_ci = {os.path.normcase(af._norm_root(k)): v for k, v in done.items()}
+        cur_root_ci = os.path.normcase(af._norm_root(self.app._current_root)) if getattr(self.app, "_current_root", None) else None
         any_total = bool(totals)
         for key, chip in self._chips.items():
-            total = totals.get(key)
-            d = done.get(key, 0)
+            key_ci = os.path.normcase(key)
+            total = totals.get(key, totals_ci.get(key_ci))
+            d = done.get(key, done_ci.get(key_ci, 0))
             name = Path(key).name or key
             if total is None:
                 text, is_done = name, False
@@ -684,7 +691,7 @@ class FolderBar(QWidget):
                 text, is_done = f"✓ {name}  {total}", True
             else:
                 text, is_done = f"{name}  {d}/{total}", False
-            is_active = (cur_root is not None and key == cur_root
+            is_active = (cur_root_ci is not None and key_ci == cur_root_ci
                          and self.app.scan_thread is not None
                          and self.app.scan_thread.is_alive())
             chip.set_state(text, is_done, is_active)
@@ -793,13 +800,15 @@ class TitleBar(QWidget):
         self._toggle_max()
 
     def apply_theme(self, dark, clay, base):
-        bg = "#0b0b0b" if dark else "#f9f9f7"
-        border = "rgba(217,119,87,0.16)" if dark else "rgba(198,97,63,0.22)"
+        bg = CDST.c(dark, CDSTT.surface0)
+        border = CDST.c(dark, CDSTT.border)
+        btn_fg = CDST.c(dark, CDSTT.text_2)
+        btn_hov = CDST.c(dark, CDSTT.hover)
         self.setStyleSheet(
             f"#titleBar {{ background: {bg}; border-bottom: 1px solid {border}; }}"
-            f"#titleBtn {{ background: transparent; border: none; color: {'#a3a3a3' if dark else '#525252'};"
+            f"#titleBtn {{ background: transparent; border: none; color: {btn_fg};"
             f" font-size: 13px; font-family: 'Segoe UI', 'Microsoft YaHei UI'; }}"
-            f"#titleBtn:hover {{ background: {'rgba(255,255,255,0.08)' if dark else 'rgba(0,0,0,0.06)'}; }}"
+            f"#titleBtn:hover {{ background: {btn_hov}; }}"
             f"#titleClose:hover {{ background: #c42b1c; color: #ffffff; }}")
         self.brand.setStyleSheet(
             'font-family: "Microsoft YaHei UI", "Segoe UI";'
@@ -1122,7 +1131,9 @@ class Lightbox(QWidget):
         # Qt angleDelta().y() 向上滚为正（放大）、向下滚为负（缩小）
         factor = math.exp(max(-6, min(6, e.angleDelta().y() * self.WHEEL_FACTOR)))
         old = self.scale
-        max_scale = max(2.0, self._original_size[0] / max(1, self._fit_w))
+        max_scale = max(2.0,
+                        self._original_size[0] / max(1e-6, self._fit_w),
+                        self._original_size[1] / max(1e-6, self._fit_h))
         self.scale = max(0.5, min(max_scale * 1.2, self.scale * factor))
         if self.scale < self.SNAP_UNDER:
             self.scale = 1.0
@@ -1403,7 +1414,7 @@ class WaveDots(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
-        c = QColor("#d97757")
+        c = _qc(CDST.c(isDarkTheme(), CDSTT.clay))
         now = time.time()
         for i in range(3):
             ph = ((now - self._t0) % 1.9) / 1.9
@@ -1671,6 +1682,16 @@ class App(FramelessWindow):
             self.lm.refresh_theme(d)
         if hasattr(self, "_empty"):
             self._empty.refresh_theme(d)
+        try:
+            from cds_widgets import CDSToast
+            for toast in list(CDSToast._stack):
+                try:
+                    if toast.parent() is self:
+                        toast.refresh_theme(d)
+                except RuntimeError:
+                    continue
+        except Exception:
+            pass
         self._dispose_css = None
         self._apply_selection_palette()
         if hasattr(self, "status_pill"):
@@ -2148,6 +2169,39 @@ class App(FramelessWindow):
         self._selection_updated()
         return self
 
+    def _prune_removed_roots(self, removed_roots):
+        """清理被移除扫描根目录下的孤立结果、勾选项、相似组与目录进度。"""
+        if not removed_roots:
+            return
+        removed_norm = [af._norm_root(r) for r in removed_roots]
+        removed_keys = {os.path.normcase(r) for r in removed_norm}
+        remain_roots = [af._norm_root(r) for r in self._roots]
+        removed_paths = set()
+        kept_items = []
+        for it in self.items:
+            p = it["path"]
+            if (any(af._path_is_within(p, rr) for rr in removed_norm)
+                    and not any(af._path_is_within(p, rr) for rr in remain_roots)):
+                removed_paths.add(p)
+            else:
+                kept_items.append(it)
+        if removed_paths:
+            self.items = kept_items
+            self._pending_rows = [it for it in self._pending_rows if it["path"] not in removed_paths]
+            for p in removed_paths:
+                self.model.checked.discard(p)
+                if hasattr(self, "_stat_cache"):
+                    self._stat_cache.pop(p, None)
+            self.checked = self.model.checked
+            self._apply_similar(self.similar_groups)
+        for key in list(self._folder_totals):
+            if os.path.normcase(af._norm_root(key)) in removed_keys:
+                self._folder_totals.pop(key, None)
+                self._folder_done.pop(key, None)
+        for it in self.items:
+            it.pop("_folder", None)
+            self._ensure_folder_label(it, remain_roots)
+
     def remove_folder(self, path=None):
         """移除一个导入文件夹（chip 右键 / 配置弹窗），同步清理该目录残留结果。"""
         if path is None:
@@ -2158,26 +2212,7 @@ class App(FramelessWindow):
         target = af._norm_root(path)
         target_key = os.path.normcase(target)
         self._roots = [r for r in self._roots if os.path.normcase(af._norm_root(r)) != target_key]
-        remain_roots = [af._norm_root(r) for r in self._roots]
-        removed_paths = set()
-        kept_items = []
-        for it in self.items:
-            p = it["path"]
-            if af._path_is_within(p, target) and not any(af._path_is_within(p, rr) for rr in remain_roots):
-                removed_paths.add(p)
-            else:
-                kept_items.append(it)
-        if removed_paths:
-            self.items = kept_items
-            for p in removed_paths:
-                self.model.checked.discard(p)
-                self._stat_cache.pop(p, None)
-            self.checked = self.model.checked
-            self._apply_similar(self.similar_groups)
-        for key in list(self._folder_totals):
-            if os.path.normcase(af._norm_root(key)) == target_key:
-                self._folder_totals.pop(key, None)
-                self._folder_done.pop(key, None)
+        self._prune_removed_roots([target])
         af.save_config(self.cfg)
         self.folder_bar.rebuild()
         self.refresh()
@@ -2428,13 +2463,14 @@ class App(FramelessWindow):
         if self._cache is None:
             self._cache = af.Cache(af.CACHE_PATH)
         self.cfg["disposal"] = self._current_disposal()
-        # 识别方式变化后旧判定不可信（缓存键只有 path/size/mtime），必须清缓存全量重判
-        if self.cfg.get("_last_enable") != enable:
+        # 识别方式或规则变化由 check_config_version(cfg, enable) 精确比对签名；
+        # 仅在会话内已记录 _last_enable 且发生变动时显式清缓存，避免导入同规则配置后误清全库。
+        if "_last_enable" in self.cfg and self.cfg.get("_last_enable") != enable:
             try:
                 self._cache.clear_results()
             except Exception:
                 pass
-            self.cfg["_last_enable"] = dict(enable)
+        self.cfg["_last_enable"] = dict(enable)
         # 规则/阈值变化（同一会话内改了规则或 OCR 选项）也要即时清缓存
         try:
             self._cache.check_config_version(self.cfg, enable)
@@ -2530,6 +2566,7 @@ class App(FramelessWindow):
         folder_updated = False
         current_hit = False
         deadline = time.perf_counter() + .012
+        norm_roots = None
         try:
             for _ in range(5000):
                 if time.perf_counter() >= deadline:
@@ -2547,15 +2584,19 @@ class App(FramelessWindow):
                     self._current_file = (str(Path(root) / fname) if root else fname)
                     current_hit = True
                 elif kind == "folders":
-                    self._folder_totals = {str(k).rstrip("\\/"): int(v) for k, v in (payload or {}).items()}
+                    self._folder_totals = {af._norm_root(k): int(v) for k, v in (payload or {}).items()}
                     folder_updated = True
                 elif kind == "folder_progress":
                     r, d, t = payload
-                    self._folder_done[str(r).rstrip("\\/")] = d
-                    self._folder_totals[str(r).rstrip("\\/")] = t
+                    rk = af._norm_root(r)
+                    self._folder_done[rk] = d
+                    self._folder_totals[rk] = t
                     folder_updated = True
                 elif kind == "item":
                     if payload["verdict"] in ("ad", "suspect", "error"):
+                        if norm_roots is None:
+                            norm_roots = [af._norm_root(r) for r in self.get_roots()]
+                        self._ensure_folder_label(payload, norm_roots)
                         self._had_review_hits = True
                         self.items.append(payload)
                         self._review_totals[payload['verdict']] += 1
@@ -2715,34 +2756,42 @@ class App(FramelessWindow):
             import traceback
             traceback.print_exc()
 
-    def _flush_rows(self, limit=30):
+    def _ensure_folder_label(self, it, norm_roots=None):
+        """确保条目带有来源文件夹展示标签（兼容大小写与盘符根目录）。"""
+        if it.get("_folder"):
+            return
+        p_str = it.get("path", "")
+        if not p_str:
+            return
+        if norm_roots is None:
+            norm_roots = [af._norm_root(r) for r in self.get_roots()]
+        best = ""
+        for r in norm_roots:
+            if af._path_is_within(p_str, r) and len(r) > len(best):
+                best = r
+        if best:
+            root_label = Path(best).name or af._root_label(Path(best))
+            rel = p_str[len(best):].lstrip("\\/")
+            parent = str(Path(rel).parent).replace("\\", "/") if rel else ""
+            if parent and parent != ".":
+                it["_folder"] = f"{root_label}/{parent}"
+            else:
+                it["_folder"] = root_label
+        else:
+            parent_path = Path(p_str).parent
+            it["_folder"] = parent_path.name or af._root_label(parent_path)
+
+    def _flush_rows(self, limit=120):
         if not self._pending_rows:
             return
         batch = self._pending_rows[:limit]
         del self._pending_rows[:limit]
         fp = self._filter_params()
         add = [it for it in batch if self._passes_filter(it, fp)]
-        # 补来源文件夹（根名/子路径），卡片下方展示
-        roots = [str(Path(r)).rstrip("\\/") for r in self.get_roots()]
-        for it in add:
-            if it.get("_folder"):
-                continue
-            p_str = it["path"]
-            best = ""
-            for r in roots:
-                if p_str == r or p_str.startswith(r + os.sep):
-                    if len(r) > len(best):
-                        best = r
-            if best:
-                rel = p_str[len(best):].lstrip("\\/")
-                parent = str(Path(rel).parent).replace("\\", "/")
-                if parent and parent != ".":
-                    it["_folder"] = f"{Path(best).name}/{parent}"
-                else:
-                    it["_folder"] = Path(best).name
-            else:
-                it["_folder"] = Path(p_str).parent.name
         if add:
+            norm_roots = [af._norm_root(r) for r in self.get_roots()]
+            for it in add:
+                self._ensure_folder_label(it, norm_roots)
             start = len(self.model.items)
             self.model.beginInsertRows(QModelIndex(), start, start + len(add) - 1)
             self.model.items.extend(add)
@@ -2833,9 +2882,11 @@ class App(FramelessWindow):
 
     def refresh(self):
         self._review_totals = {v: 0 for v in ('ad', 'suspect', 'error')}
+        norm_roots = [af._norm_root(r) for r in self.get_roots()] if self.items else None
         for item in self.items:
             if item['verdict'] in self._review_totals:
                 self._review_totals[item['verdict']] += 1
+            self._ensure_folder_label(item, norm_roots)
         current = self._current_item()
         previous_row = max(0, self.grid.currentIndex().row())
         current_path = current['path'] if current else None
@@ -3177,6 +3228,11 @@ class App(FramelessWindow):
                     palette.reposition(self)
             except RuntimeError:
                 self._palette = None
+        try:
+            from cds_widgets import CDSToast
+            CDSToast._layout_stack(self)
+        except Exception:
+            pass
 
     def _reload_preview_for_size(self):
         if self._preview_path:
@@ -3236,6 +3292,7 @@ class App(FramelessWindow):
             if hasattr(self, "_stat_cache"):
                 self._stat_cache.pop(path, None)
             self.refresh()
+            self._reload_reason_filter()
             self._apply_similar(self.similar_groups)
             self._log(f"标记保留：{Path(path).name}")
         return self
@@ -3460,10 +3517,12 @@ class App(FramelessWindow):
             return self
         import csv
         try:
+            norm_roots = [af._norm_root(r) for r in self.get_roots()]
             with open(path, "w", encoding="utf-8-sig", newline="") as f:
                 w = csv.writer(f)
                 w.writerow(["文件名", "路径", "所在文件夹", "判定", "分数", "命中原因"])
                 for it in items:
+                    self._ensure_folder_label(it, norm_roots)
                     reasons = "; ".join(h.get("label", "") for h in it.get("reasons", []))
                     w.writerow([Path(it["path"]).name, it["path"], it.get("_folder", ""),
                                 VERDICT_TEXT.get(it["verdict"], it["verdict"]),
@@ -3498,12 +3557,16 @@ class FolderDropList(ListWidget):
         if not dirs:
             super().dropEvent(e)
             return
-        existing = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
-        for d in dict.fromkeys(dirs):
-            if d in existing:
+        existing = {os.path.normcase(af._norm_root(self.item(i).data(Qt.UserRole)))
+                    for i in range(self.count()) if self.item(i).data(Qt.UserRole)}
+        for d in dirs:
+            norm = af._norm_root(d)
+            key = os.path.normcase(norm)
+            if key in existing:
                 continue
-            it = QListWidgetItem(str(d))
-            it.setData(Qt.UserRole, str(d))
+            existing.add(key)
+            it = QListWidgetItem(norm)
+            it.setData(Qt.UserRole, norm)
             self.addItem(it)
         e.acceptProposedAction()
 
@@ -3732,11 +3795,14 @@ class ConfigDialog(WorkbenchDialog):
         d = QFileDialog.getExistingDirectory(self, "选择要扫描的文件夹")
         if not d:
             return
-        existing = [self.folder_list.item(i).data(Qt.UserRole) for i in range(self.folder_list.count())]
-        if d in existing:
+        norm = af._norm_root(d)
+        key = os.path.normcase(norm)
+        existing = {os.path.normcase(af._norm_root(self.folder_list.item(i).data(Qt.UserRole)))
+                    for i in range(self.folder_list.count()) if self.folder_list.item(i).data(Qt.UserRole)}
+        if key in existing:
             return
-        it = QListWidgetItem(d)
-        it.setData(Qt.UserRole, d)
+        it = QListWidgetItem(norm)
+        it.setData(Qt.UserRole, norm)
         self.folder_list.addItem(it)
 
     def _rm(self):
@@ -3823,7 +3889,20 @@ class ConfigDialog(WorkbenchDialog):
         if old not in known:
             known.append(old)
         data['quarantine_locations'] = known
-        self.app._roots = [af._norm_root(r) for r in roots if r]
+        old_roots = list(self.app._roots)
+        dedup_roots = []
+        seen_roots = set()
+        for r in roots:
+            if not r:
+                continue
+            norm = af._norm_root(r)
+            key = os.path.normcase(norm)
+            if key not in seen_roots:
+                seen_roots.add(key)
+                dedup_roots.append(norm)
+        removed_roots = [r for r in old_roots if os.path.normcase(af._norm_root(r)) not in seen_roots]
+        self.app._roots = dedup_roots
+        self.app._prune_removed_roots(removed_roots)
         self.cfg.clear()
         self.cfg.update(data)
         af.save_config(self.cfg)
@@ -3836,6 +3915,7 @@ class ConfigDialog(WorkbenchDialog):
         if hasattr(self.app, "folder_bar"):
             self.app.folder_bar.rebuild()
             self.app.refresh()
+            self.app._reload_reason_filter()
         self.accept()
         return True
 

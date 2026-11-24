@@ -234,6 +234,8 @@ class CDSCommandPalette(QWidget):
             self.list.setCurrentRow(0)
 
     def _run_current(self):
+        if not self.isVisible():
+            return
         it = self.list.currentItem()
         if it is None:
             return

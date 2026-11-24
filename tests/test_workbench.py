@@ -782,6 +782,103 @@ class WorkbenchTests(unittest.TestCase):
             self.app.set_palette('atelier', save=False)
             self.app.set_density('compact', save=False)
 
+    def test_folder_labels_populated_across_large_done_batch_and_drive_roots(self):
+        self.app.items.clear()
+        self.app._pending_rows.clear()
+        album = self.root / 'AlbumOne'
+        sub = album / 'Sub'
+        sub.mkdir(parents=True)
+        self.app.add_folders([str(album), 'D:\\'])
+        self.app.f_verdict.setCurrentIndex(1)  # 扫描中切到「广告」，验证被过滤的「疑似」同样获得 _folder
+        for i in range(45):
+            verdict = 'ad' if i < 5 else 'suspect'
+            p = str(sub / f'img_{i:02d}.jpg')
+            self.app.scan_q.put(('item', {'path': p, 'verdict': verdict, 'score': 50,
+                                          'reasons': [{'type': 'qr', 'label': '二维码无链接内容'}], 'ocr_text': ''}))
+        self.app.scan_q.put(('item', {'path': 'd:\\TopSub\\drive_pic.jpg', 'verdict': 'ad', 'score': 80,
+                                      'reasons': [{'type': 'qr', 'label': '二维码含链接 x'}], 'ocr_text': ''}))
+        self.app.scan_q.put(('done', None))
+        self.app._poll_queue()
+        self.assertEqual(len(self.app.items), 46)
+        self.assertTrue(all(bool(it.get('_folder')) for it in self.app.items))
+        self.assertEqual(self.app.items[0]['_folder'], 'AlbumOne/Sub')
+        self.assertEqual(self.app.items[-1]['_folder'], '盘_D/TopSub')
+
+    def test_config_dialog_prunes_removed_folders_and_scan_keeps_valid_cache(self):
+        dir_a = self.root / 'KeepDir'
+        dir_b = self.root / 'DropDir'
+        dir_a.mkdir()
+        dir_b.mkdir()
+        img_a = dir_a / 'normal_a.jpg'
+        img_b = dir_b / 'ad_b.jpg'
+        Image.new('RGB', (400, 300), (60, 70, 80)).save(img_a)
+        Image.new('RGB', (400, 300), (90, 70, 60)).save(img_b)
+        self.app.add_folders([str(dir_a), str(dir_b)])
+        self.app.items = [
+            {'path': str(img_a), 'verdict': 'suspect', 'score': 30, 'reasons': [{'type': 'qr', 'label': '原因A'}], 'ocr_text': ''},
+            {'path': str(img_b), 'verdict': 'ad', 'score': 90, 'reasons': [{'type': 'filename', 'label': '原因B'}], 'ocr_text': ''},
+        ]
+        self.app.checked = {str(img_a), str(img_b)}
+        self.app.model.checked = self.app.checked
+        self.app.refresh()
+        self.app._reload_reason_filter()
+
+        dlg = self.app.build_config()
+        try:
+            # 在设置弹窗内移除第二个目录并保存，应自动清理该目录残留结果与勾选
+            for i in range(dlg.folder_list.count() - 1, -1, -1):
+                if 'DropDir' in dlg.folder_list.item(i).text():
+                    dlg.folder_list.takeItem(i)
+            self.assertTrue(dlg.validate())
+        finally:
+            dlg.close()
+            dlg.deleteLater()
+        self.assertEqual([it['path'] for it in self.app.items], [str(img_a)])
+        self.assertEqual(self.app.checked, {str(img_a)})
+        self.assertNotIn('原因B', [self.app.f_reason.itemText(i) for i in range(self.app.f_reason.count())])
+
+        # 验证缺少 _last_enable（模拟导入同规则配置后）首次扫描不会误清空签名匹配的缓存
+        enable = {'filename': self.app.cfg.get('_enable_filename', True),
+                  'shape': self.app.cfg.get('_enable_shape', True),
+                  'qr': self.app.cfg['qr']['enabled'],
+                  'ocr': self.app.cfg['ocr']['enabled']}
+        self.app.cfg.pop('_last_enable', None)
+        cache = af.Cache(af.CACHE_PATH)
+        self.app._cache = cache
+        cache.check_config_version(self.app.cfg, enable)
+        st = img_a.stat()
+        cache.put(str(img_a), st.st_size, st.st_mtime, 'ad', 88, [{'type': 'filename', 'label': '缓存命中验证'}], '')
+        cache.commit()
+        self.app.start_scan()
+        self.assertTrue(self.pump(until=lambda: not self.app._scan_running(), timeout=5))
+        self.assertEqual(self.app._cached_count, 1)
+        self.assertEqual(len(self.app.items), 1)
+        self.assertEqual(self.app.items[0]['reasons'][0]['label'], '缓存命中验证')
+
+    def test_lightbox_keep_reloads_reasons_and_palette_guards_double_trigger(self):
+        from cds_widgets import CDSCommandPalette
+        p1 = self.root / 'keep_me.jpg'
+        p2 = self.root / 'stay.jpg'
+        Image.new('RGB', (400, 300), (20, 40, 60)).save(p1)
+        Image.new('RGB', (400, 300), (60, 40, 20)).save(p2)
+        self.app.items = [
+            {'path': str(p1), 'verdict': 'suspect', 'score': 30, 'reasons': [{'type': 'qr', 'label': '独有原因X'}], 'ocr_text': ''},
+            {'path': str(p2), 'verdict': 'ad', 'score': 80, 'reasons': [{'type': 'qr', 'label': '保留原因Y'}], 'ocr_text': ''},
+        ]
+        self.app.refresh()
+        self.app._reload_reason_filter()
+        self.assertIn('独有原因X', [self.app.f_reason.itemText(i) for i in range(self.app.f_reason.count())])
+        self.app.mark_path(str(p1), False)
+        self.assertNotIn('独有原因X', [self.app.f_reason.itemText(i) for i in range(self.app.f_reason.count())])
+
+        calls = []
+        pal = CDSCommandPalette.popup(self.app, [('单次触发', lambda: calls.append(1))])
+        self.pump(.05)
+        item = pal.list.item(0)
+        pal.list.itemClicked.emit(item)
+        pal.list.itemActivated.emit(item)
+        self.assertEqual(calls, [1])
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
