@@ -368,6 +368,38 @@ class ScanEngineTests(unittest.TestCase):
         self.cache.commit()
         self.assertEqual(self.cache.get_hashes_batch([('high_bit', 10, 2.0)]), {'high_bit': (1 << 64) - 3})
 
+    def test_cache_stat_tuple_and_nested_or_stale_roots_in_quarantine(self):
+        # 缓存读取直接附带 _stat，且空 reasons 走快速分支不破坏返回结构
+        self.cache.put('clean_one', 4096, 1234.5, 'clean', 0, [], '')
+        self.cache.put('hit_one', 8192, 5678.0, 'ad', 95, [{'type': 'qr', 'label': '二维码'}], 'wx')
+        self.cache.commit()
+        got = self.cache.get('clean_one', 4096, 1234.5)
+        self.assertEqual((got['reasons'], got['_stat']), ([], (4096, 1234.5)))
+        batch = self.cache.get_batch([('clean_one', 4096, 1234.5), ('hit_one', 8192, 5678.0)])
+        self.assertEqual(batch['clean_one']['_stat'], (4096, 1234.5))
+        self.assertEqual(batch['hit_one']['_stat'], (8192, 5678.0))
+        self.assertEqual(batch['hit_one']['reasons'][0]['type'], 'qr')
+
+        # 嵌套目录（外层盘/父目录在前，子目录在后）应匹配最具体的子目录名；且失效盘符不中断隔离
+        outer = self.root / 'outer'
+        inner = outer / 'album_sub'
+        inner.mkdir(parents=True)
+        pic = inner / 'ad_pic.jpg'
+        pic.write_bytes(b'nested-image')
+        qdir = self.root / 'quarantine_nested'
+        stale_root = 'Z:\\__definitely_unmounted__\\ghost\x00bad'
+        moved, errors, ok = af.apply_quarantine(
+            [dict(path=str(pic))],
+            [stale_root, str(outer), str(inner)],
+            qdir,
+            lambda _: None,
+        )
+        self.assertEqual((moved, errors, ok), (1, [], [str(pic)]))
+        entries = af.list_quarantine(qdir)
+        self.assertEqual(len(entries), 1)
+        dst_rel = Path(entries[0]['dst']).relative_to(qdir)
+        self.assertEqual(dst_rel.parts[0], 'album_sub')
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

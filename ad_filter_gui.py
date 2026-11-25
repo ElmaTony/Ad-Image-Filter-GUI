@@ -104,10 +104,10 @@ class ThumbCache(QObject):
             try:
                 from PIL import ImageOps
                 img, _ = af.load_display_image(Path(path), self._size)
-                img = ImageOps.contain(img, (self._size, self._size))
-                rgb = img.convert("RGB")
+                if img.width > 240 or img.height > 210:
+                    img = ImageOps.contain(img, (240, 210))
                 try:
-                    self._sig_store.emit((generation, path, rgb.tobytes(), rgb.width, rgb.height, False))
+                    self._sig_store.emit((generation, path, img.tobytes(), img.width, img.height, False))
                 except RuntimeError:
                     return  # 对象已销毁（关窗瞬间）
             except Exception:
@@ -134,8 +134,6 @@ class ThumbCache(QObject):
         if pm.isNull():
             self._mark_failed(path)
             return
-        # 预缩放到大图密度上限，确保紧凑/标准/大图三档卡片都清晰流畅
-        pm = pm.scaled(240, 210, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         with self._lock:
             self._cache[path] = pm
             while len(self._cache) > self._max:
@@ -2125,9 +2123,10 @@ class App(FramelessWindow):
         path = self.model.items[row]["path"]
         folder = str(Path(path).parent)
         try:
-            # explorer /select 高亮目标文件；文件已不在（被处置）则退化为打开目录
+            # explorer /select 高亮目标文件；使用紧邻逗号的无空格参数串以兼容含空格/逗号文件名
             if Path(path).exists():
-                subprocess.Popen(["explorer", "/select,", str(Path(path))])
+                norm_p = os.path.normpath(str(Path(path)))
+                subprocess.Popen(f'explorer.exe /select,"{norm_p}"')
             else:
                 QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
         except Exception as e:
@@ -2597,6 +2596,11 @@ class App(FramelessWindow):
                         if norm_roots is None:
                             norm_roots = [af._norm_root(r) for r in self.get_roots()]
                         self._ensure_folder_label(payload, norm_roots)
+                        st_pair = payload.get("_stat")
+                        if st_pair is not None:
+                            if not hasattr(self, "_stat_cache"):
+                                self._stat_cache = {}
+                            self._stat_cache[payload["path"]] = st_pair
                         self._had_review_hits = True
                         self.items.append(payload)
                         self._review_totals[payload['verdict']] += 1
@@ -3201,6 +3205,13 @@ class App(FramelessWindow):
         tb.setGeometry(0, 0, self.width(), tb.height())
         tb.raise_()
 
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() == QEvent.WindowStateChange:
+            tb = getattr(self, "_titlebar", None)
+            if tb is not None and hasattr(tb, "btn_max"):
+                tb.btn_max.setText("❐" if self.isMaximized() else "☐")
+
     def resizeEvent(self, e):
         super().resizeEvent(e)          # 基类靠它拉宽标题栏，不能漏
         self._sync_titlebar()           # 双保险：不依赖基类实现
@@ -3787,6 +3798,8 @@ class ConfigDialog(WorkbenchDialog):
         if not directory.is_absolute():
             raise ValueError('请选择完整的隔离目录路径')
         directory = directory.resolve()
+        if directory.anchor and not Path(directory.anchor).exists():
+            raise ValueError('所选隔离目录所在磁盘不存在')
         if directory == Path(directory.anchor) or (directory.exists() and not directory.is_dir()):
             raise ValueError('请选择一个文件夹作为隔离目录，不能使用磁盘根目录或文件')
         data['quarantine_dir'] = str(directory)
@@ -3823,7 +3836,7 @@ class ConfigDialog(WorkbenchDialog):
             return
         try:
             data = {k: v for k, v in self._form_config().items() if not k.startswith("_last_")}
-            Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            af._write_json_atomic(Path(path), data)
             InfoBar.success(title="已导出", content=Path(path).name,
                             orient=Qt.Horizontal, isClosable=True,
                             position=InfoBarPosition.TOP, duration=2500, parent=self)

@@ -192,6 +192,28 @@ class AboutUpdateTests(unittest.TestCase):
         self.assertFalse(self.dialog._update_timer.isActive())
         self.assertIn('异常', self.dialog.update_status.text())
 
+    def test_about_brand_card_copy_version_and_quick_links(self):
+        from PySide6.QtGui import QDesktopServices, QGuiApplication
+        self.open_dialog()
+        self.assertEqual(self.dialog.version_label.text(), '版本 v1.4.0')
+        self.assertFalse(self.dialog.icon_label.pixmap().isNull())
+        self.assertTrue(self.dialog.copy_version_button.isVisible())
+        self.assertTrue(self.dialog.releases_button.isVisible())
+        self.assertTrue(self.dialog.data_dir_button.isVisible())
+
+        self.dialog.copy_version_button.click()
+        self.assertIn('已复制', self.dialog.copy_version_button.text())
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            self.assertEqual(clipboard.text(), 'v1.4.0')
+
+        with patch.object(QDesktopServices, 'openUrl', return_value=True) as open_url:
+            self.dialog.releases_button.click()
+            self.dialog.data_dir_button.click()
+        self.assertEqual(open_url.call_count, 2)
+        self.assertEqual(open_url.call_args_list[0].args[0].toString(), updates.RELEASES_URL)
+        self.assertTrue(open_url.call_args_list[1].args[0].isLocalFile())
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

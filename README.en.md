@@ -77,7 +77,7 @@ For **Windows 10 / 11 (64-bit)**, single-file portable executable:
 3. To upgrade without losing settings, close the running app and replace the old EXE with the new one in the same folder.
 
 > [!TIP]
-> **In-App Update Check**: Open **About → Check for Updates** (in narrow windows: **More → About**). If a newer release exists, the dialog displays its version and release link so you stay in control of downloading and replacing the binary. Private-repo checks reuse Git Credential Manager or read `ADFILTER_GITHUB_TOKEN` (read-only **Contents** scope only; never written to disk).
+> **In-App Update Check**: Open **About → Check for Updates** (in narrow windows: **More → About**) to copy the current version, open your local data folder, or check for new releases on demand. When a newer release is available, the dialog shows its version and download link so you stay in control of replacing the binary. Private-repo checks reuse Git Credential Manager or read `ADFILTER_GITHUB_TOKEN` (read-only **Contents** scope only; never written to disk).
 
 ### 4-Step Cleanup Workflow
 

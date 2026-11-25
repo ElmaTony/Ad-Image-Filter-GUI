@@ -317,7 +317,10 @@ class Cache:
                 (path, size, mtime, self.result_version if version is None else version),
             ).fetchone()
         if row and row[0] != 'error':
-            return {"verdict": row[0], "score": row[1], "reasons": json.loads(row[2]), "ocr_text": row[3]}
+            reasons_raw = row[2]
+            return {"verdict": row[0], "score": row[1],
+                    "reasons": [] if reasons_raw == "[]" else json.loads(reasons_raw),
+                    "ocr_text": row[3], "_stat": (size, mtime)}
         return None
 
     def get_batch(self, file_infos: list[tuple[str, int, float]], version=None) -> dict[str, dict]:
@@ -340,8 +343,10 @@ class Cache:
             # Python 侧按 size+mtime 精确过滤（SQLite 不支持 tuple IN VALUES）
             for r in rows:
                 if (r[0], r[1], r[2]) in want and r[3] != 'error':
+                    reasons_raw = r[5]
                     out[r[0]] = {"verdict": r[3], "score": r[4],
-                                 "reasons": json.loads(r[5]), "ocr_text": r[6]}
+                                 "reasons": [] if reasons_raw == "[]" else json.loads(reasons_raw),
+                                 "ocr_text": r[6], "_stat": (r[1], r[2])}
         return out
 
     def clear_results(self):
@@ -393,10 +398,11 @@ class Cache:
         return out
 
     def put(self, path: str, size: int, mtime: float, verdict: str, score: float, reasons: list, ocr_text: str, version=None):
+        reasons_str = "[]" if not reasons else json.dumps(reasons, ensure_ascii=False)
         with self.lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO results VALUES(?,?,?,?,?,?,?,?,?)",
-                (path, size, mtime, verdict, score, json.dumps(reasons, ensure_ascii=False), ocr_text, time.time(),
+                (path, size, mtime, verdict, score, reasons_str, ocr_text, time.time(),
                  self.result_version if version is None else version),
             )
 
@@ -782,7 +788,8 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict,
     wl = match_rules(path.name, cfg.get("whitelist_rules", []))
     if wl:
         result = {"path": path_str, "verdict": "clean", "score": 0,
-                  "reasons": [{"type": "whitelist", "label": "白名单"}], "ocr_text": ""}
+                  "reasons": [{"type": "whitelist", "label": "白名单"}], "ocr_text": "",
+                  "_stat": (size, mtime)}
         cache.put(path_str, size, mtime, result["verdict"], 0, result["reasons"], "", version)
         return result
 
@@ -833,7 +840,7 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict,
         if img is not None and verdict == "clean" and is_blank_image(img):
             if not shape_long:
                 result = {"path": path_str, "verdict": "clean", "score": 0,
-                          "reasons": [], "ocr_text": ""}
+                          "reasons": [], "ocr_text": "", "_stat": (size, mtime)}
                 cache.put(path_str, size, mtime, "clean", 0, [], "", version)
                 return result
             img = None
@@ -935,7 +942,8 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict,
     if verdict == "clean" and shape_long:
         verdict, score = "suspect", 30
 
-    result = {"path": path_str, "verdict": verdict, "score": score, "reasons": reasons, "ocr_text": ocr_text}
+    result = {"path": path_str, "verdict": verdict, "score": score, "reasons": reasons,
+              "ocr_text": ocr_text, "_stat": (size, mtime)}
     if verdict != "error":
         cache.put(path_str, size, mtime, verdict, score, reasons, ocr_text, version)
     return result
@@ -1396,8 +1404,15 @@ def apply_quarantine(items: list[dict], roots: list[str], quarantine_root: Path,
     incomplete = False
     root_names = {}
     for r in roots:
-        rp = Path(r).resolve()
+        try:
+            rp = Path(r).resolve()
+        except (OSError, ValueError):
+            clean_r = str(r).replace("\x00", "").strip()
+            if not clean_r:
+                continue
+            rp = Path(os.path.abspath(clean_r))
         root_names[_norm_root(rp)] = _root_label(rp)
+    sorted_roots = sorted(root_names.items(), key=lambda kv: len(kv[0]), reverse=True)
     for it in items:
         src = Path(it["path"])
         dst = None
@@ -1405,7 +1420,7 @@ def apply_quarantine(items: list[dict], roots: list[str], quarantine_root: Path,
             src_abs = Path(os.path.abspath(str(src))) if src.is_symlink() else src.resolve()
             src_res = str(src_abs)
             root_for = None
-            for rp, name in root_names.items():
+            for rp, name in sorted_roots:
                 if _path_is_within(src_res, rp):
                     root_for = name
                     rel = src_res[len(rp):].lstrip("\\/")
