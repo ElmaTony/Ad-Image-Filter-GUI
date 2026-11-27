@@ -537,6 +537,7 @@ def build_workbench(app):
     root.addWidget(footer)
     app.log = TextEdit(app)
     app.log.setReadOnly(True)
+    app.log.document().setMaximumBlockCount(500)
     app.log.setFixedHeight(0)
     app.log.hide()
     root.addWidget(app.log)

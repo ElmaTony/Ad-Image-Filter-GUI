@@ -879,6 +879,65 @@ class WorkbenchTests(unittest.TestCase):
         pal.list.itemActivated.emit(item)
         self.assertEqual(calls, [1])
 
+    def test_csv_formula_escape_rule_editor_commit_and_lightbox_state(self):
+        import csv
+        from PySide6.QtWidgets import QLineEdit
+        csv_out = self.root / 'safe_export.csv'
+        formula_img = self.root / '=cmd_danger.jpg'
+        Image.new('RGB', (360, 260), (80, 40, 40)).save(formula_img)
+        self.app.items = [{
+            'path': str(formula_img),
+            'verdict': 'ad',
+            'score': 88,
+            'reasons': [{'type': 'ocr', 'label': '@promo\nsecond_line'}],
+            'ocr_text': '',
+        }]
+        self.app.refresh()
+        with patch.object(QFileDialog, 'getSaveFileName', return_value=(str(csv_out), 'csv')):
+            self.app.export_report()
+        rows = list(csv.reader(csv_out.read_text(encoding='utf-8-sig').splitlines()))
+        self.assertEqual(rows[1][0], "'=cmd_danger.jpg")
+        self.assertEqual(rows[1][5], "'@promo second_line")
+
+        # 规则管理：单元格处于编辑态尚未按回车时直接点保存，修改不丢失
+        dlg = self.app.build_rule_editor()
+        try:
+            dlg.show()
+            self.pump(.05)
+            tbl = dlg._pages['filename_rules']['table']
+            dlg._add_row(tbl, False)
+            last_r = tbl.rowCount() - 1
+            cell = tbl.item(last_r, 0)
+            tbl.setCurrentItem(cell)
+            tbl.editItem(cell)
+            self.pump(.05)
+            editor = tbl.focusWidget()
+            if isinstance(editor, QLineEdit):
+                editor.setText('uncommitted_live_pattern')
+            else:
+                cell.setText('uncommitted_live_pattern')
+            self.assertTrue(dlg.do_save())
+            self.assertTrue(any(r['pattern'] == 'uncommitted_live_pattern' for r in self.app.cfg['filename_rules']))
+        finally:
+            dlg.close()
+            dlg.deleteLater()
+
+        # Lightbox 按钮状态随标记切换，且 ThumbCache.invalidate 精确驱逐
+        self.app.grid.setCurrentIndex(self.app.model.index(0, 0))
+        self.app.open_big()
+        lb = self.app._big_win
+        self.pump(.1)
+        self.assertEqual(lb.btn_ad.text(), '标记广告 (A)')
+        lb._mark(True)
+        self.assertEqual(lb.btn_ad.text(), '✓ 已标广告 (A)')
+        lb.close()
+        self.pump(.05)
+        p_str = str(formula_img)
+        self.app.thumbs.get(p_str)
+        self.assertTrue(self.pump(until=lambda: p_str in self.app.thumbs._cache))
+        self.app.thumbs.invalidate([p_str])
+        self.assertNotIn(p_str, self.app.thumbs._cache)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

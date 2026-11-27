@@ -400,6 +400,78 @@ class ScanEngineTests(unittest.TestCase):
         dst_rel = Path(entries[0]['dst']).relative_to(qdir)
         self.assertEqual(dst_rel.parts[0], 'album_sub')
 
+    def test_transparent_qr_16bit_image_case_cache_readonly_ops_and_log_cap(self):
+        import stat
+        import numpy as np
+        import qrcode
+
+        # 1) 透明背景黑色二维码 PNG：旧版直接 convert('RGB') 会变全黑漏检
+        qr = qrcode.QRCode(border=2, box_size=8)
+        qr.add_data('https://t.me/transparent_qr_demo')
+        qr.make(fit=True)
+        qr_mask = np.asarray(qr.make_image(fill_color='black', back_color='white').convert('L'))
+        h, w = qr_mask.shape
+        rgba = np.zeros((max(360, h + 40), max(360, w + 40), 4), dtype=np.uint8)
+        # 黑色模块 Alpha=255，背景完全透明 (0,0,0,0)
+        dark_mod = qr_mask < 128
+        ys, xs = np.where(dark_mod)
+        rgba[ys + 20, xs + 20] = (0, 0, 0, 255)
+        trans_qr_path = self.root / 'transparent_qr.png'
+        Image.fromarray(rgba).save(trans_qr_path)
+        res_qr = af.analyze_file(trans_qr_path, self.cfg, self.cache,
+                                 dict(filename=False, shape=True, qr=True, ocr=False))
+        self.assertEqual(res_qr['verdict'], 'ad')
+
+        # 2) 16-bit 灰度 PNG（I;16）：线性映射保留层次，不会截断成纯白空图
+        arr16 = np.full((320, 320), 12000, dtype=np.uint16)
+        arr16[80:200, 60:260] = 56000
+        p16 = self.root / 'gray16.png'
+        Image.fromarray(arr16).save(p16)
+        rgb16 = af.load_pixel_image(p16, 800)
+        self.assertFalse(af.is_blank_image(rgb16))
+
+        # 3) Windows 大小写路径缓存命中
+        up_path = 'D:\\MixedCase\\Album\\Pic01.JPG'
+        lo_path = up_path.lower()
+        self.cache.check_config_version(self.cfg, self.enable)
+        self.cache.put(up_path, 2048, 99.5, 'ad', 99, [{'type': 'filename', 'label': '渠道'}], '')
+        self.cache.put_hash(up_path, 2048, 99.5, 0x123456789ABCDEF0)
+        self.cache.commit()
+        if af.os.name == 'nt':
+            self.assertEqual(self.cache.get(lo_path, 2048, 99.5)['verdict'], 'ad')
+            self.assertIn(lo_path, self.cache.get_batch([(lo_path, 2048, 99.5)]))
+            self.assertEqual(self.cache.get_hash(lo_path, 2048, 99.5), 0x123456789ABCDEF0)
+            self.assertIn(lo_path, self.cache.get_hashes_batch([(lo_path, 2048, 99.5)]))
+
+        # 4) 只读属性图片：隔离、还原、隔离区删除与直接删除均不抛 PermissionError
+        ro_a = self.root / 'readonly_q.jpg'
+        ro_b = self.root / 'readonly_del.jpg'
+        ro_a.write_bytes(b'readonly-quarantine')
+        ro_b.write_bytes(b'readonly-delete')
+        af.os.chmod(ro_a, stat.S_IREAD)
+        af.os.chmod(ro_b, stat.S_IREAD)
+        qdir = self.root / 'ro_isolated'
+        moved, errors, _ = af.apply_quarantine([{'path': str(ro_a)}], [str(self.root)], qdir, lambda _: None)
+        self.assertEqual((moved, errors), (1, []))
+        restored, r_err = af.restore_quarantine(qdir, lambda _: None)
+        self.assertEqual((restored, r_err), (1, []))
+        self.assertTrue(ro_a.exists())
+        del_n, d_err, _ = af.apply_delete([{'path': str(ro_b)}], lambda _: None)
+        self.assertEqual((del_n, d_err), (1, []))
+        self.assertFalse(ro_b.exists())
+
+        # 5) 日志文件超过上限自动滚动截断且保持逐行有效 JSON
+        log_file = self.root / 'bounded.jsonl'
+        with patch.object(af, 'LOG_PATH', log_file), \
+                patch.object(af, '_LOG_MAX_BYTES', 600), \
+                patch.object(af, '_LOG_KEEP_BYTES', 260):
+            for idx in range(20):
+                af.log_jsonl({'action': 'test', 'idx': idx, 'pad': 'x' * 30})
+        self.assertLessEqual(log_file.stat().st_size, 750)
+        lines = log_file.read_text(encoding='utf-8').splitlines()
+        self.assertGreaterEqual(len(lines), 2)
+        self.assertEqual(json.loads(lines[-1])['idx'], 19)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

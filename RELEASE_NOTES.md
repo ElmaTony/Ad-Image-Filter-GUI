@@ -1,11 +1,11 @@
-- 全新设计「关于」弹窗：配备圆角品牌主卡、当前主题与隐私概览条、语义化版本检查状态提示，并支持一键复制版本号及快捷打开 GitHub 发行页与本地数据目录。
-- 修复文件名或路径含空格、逗号时，「打开所在文件夹」无法在资源管理器中精确定位并高亮目标图片的问题。
-- 修复同时添加外层父目录与内层子目录时，隔离目录未能优先按最具体子目录归档的问题；修复列表存在已卸载盘符目录时影响正常图片隔离与设置校验的问题。
-- 优化海量命中结果下的按体积/时间排序、全选体积统计与缩略图加载流畅度，修复窗口通过双击标题栏或贴边最大化时顶栏图标未同步切换的问题。
+- 修复透明背景 PNG/WebP 贴纸、水印与二维码以及 16 位灰度图片在识别与预览时变全黑或全白的问题。
+- 修复扫描目录路径大小写不同时未能命中已有缓存的问题，并支持正常隔离、还原或删除带有「只读」属性的图片文件。
+- 修复「规则管理」中修改单元格后未按回车直接点击保存会丢失当前编辑内容的问题；「隔离区管理 → 全部还原」新增确认提示以防误触。
+- 提升高分屏缩放下的缩略图、详情预览与图标清晰度，优化大批量结果勾选响应与宽松阈值相似图分组速度，并在大图查看器中同步显示「已标广告」状态、增强导出 CSV 在表格软件中的安全性。
 
 ---
 
-- Redesigned the **About** dialog with a brand overview card, active theme and privacy summary strip, color-coded update check banner, one-click version copy, and quick buttons for GitHub Releases and the local data folder.
-- Fixed **Open Containing Folder** failing to highlight target images in Windows Explorer when file paths contain spaces or commas.
-- Fixed quarantine folder naming when nested parent and child scan folders are added together, and prevented unmounted drive paths from blocking valid quarantine batches or settings validation.
-- Improved UI responsiveness when sorting by file size/modification time, calculating total selected size, and loading thumbnails on large result sets, and synced the title-bar maximize icon on double-click or Aero Snap maximize.
+- Fixed transparent PNG/WebP stickers, watermarks, and QR codes as well as 16-bit grayscale images turning solid black or white during detection and preview.
+- Fixed scan cache misses when folder paths differ in letter casing on Windows, and added support for quarantining, restoring, and deleting read-only image files without permission errors.
+- Fixed uncommitted inline cell edits in **Rule Manager** being lost when clicking Save directly without pressing Enter, and added a confirmation prompt before **Restore All** in **Quarantine Manager**.
+- Improved thumbnail, detail preview, and icon sharpness on High-DPI displays, sped up selection updates and higher-threshold similarity grouping on large result sets, added a marked-ad state indicator in Lightbox, and hardened exported CSV reports for spreadsheet apps.

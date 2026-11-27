@@ -20,8 +20,8 @@ import update_check
 _ABOUT_ICON_IMAGE = None
 
 
-def _rounded_app_pixmap(size: int = 56, radius: int = 13) -> QPixmap:
-    """加载内嵌高清应用图标并裁剪平滑圆角（不依赖外部文件，兼容离屏测试与单文件打包）。"""
+def _rounded_app_pixmap(size: int = 56, radius: int = 13, dpr: float = 0.0) -> QPixmap:
+    """加载内嵌高清应用图标并裁剪平滑圆角（支持高 DPI 物理像素渲染，兼容离屏测试与单文件打包）。"""
     global _ABOUT_ICON_IMAGE
     if _ABOUT_ICON_IMAGE is None:
         try:
@@ -29,22 +29,30 @@ def _rounded_app_pixmap(size: int = 56, radius: int = 13) -> QPixmap:
             _ABOUT_ICON_IMAGE = QImage.fromData(base64.b64decode(ICON_B64), 'PNG')
         except Exception:
             _ABOUT_ICON_IMAGE = QImage()
+    if dpr <= 0:
+        scr = QGuiApplication.primaryScreen()
+        dpr = float(scr.devicePixelRatio()) if scr is not None else 1.0
+    dpr = max(1.0, min(3.0, float(dpr)))
+    px = max(1, int(round(size * dpr)))
+    rad = radius * dpr
     if _ABOUT_ICON_IMAGE.isNull():
-        pm = QPixmap(size, size)
+        pm = QPixmap(px, px)
         pm.fill(Qt.transparent)
+        pm.setDevicePixelRatio(dpr)
         return pm
     scaled = QPixmap.fromImage(_ABOUT_ICON_IMAGE).scaled(
-        size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-    canvas = QPixmap(size, size)
+        px, px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    canvas = QPixmap(px, px)
     canvas.fill(Qt.transparent)
     painter = QPainter(canvas)
     painter.setRenderHint(QPainter.Antialiasing)
     painter.setRenderHint(QPainter.SmoothPixmapTransform)
     clip = QPainterPath()
-    clip.addRoundedRect(0, 0, size, size, radius, radius)
+    clip.addRoundedRect(0, 0, px, px, rad, rad)
     painter.setClipPath(clip)
     painter.drawPixmap(0, 0, scaled)
     painter.end()
+    canvas.setDevicePixelRatio(dpr)
     return canvas
 
 
@@ -289,7 +297,7 @@ class AboutDialog(WorkbenchDialog):
 
         self.icon_label = QLabel(hero)
         self.icon_label.setFixedSize(56, 56)
-        self.icon_label.setPixmap(_rounded_app_pixmap(56, 13))
+        self.icon_label.setPixmap(_rounded_app_pixmap(56, 13, self.devicePixelRatioF()))
         hero_row.addWidget(self.icon_label, 0, Qt.AlignTop)
 
         brand_col = QVBoxLayout()

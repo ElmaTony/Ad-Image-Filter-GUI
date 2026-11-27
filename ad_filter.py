@@ -30,6 +30,7 @@ import queue
 import re
 import shutil
 import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -181,25 +182,28 @@ def normalize_config(user: dict) -> dict:
 
 def load_config() -> dict:
     cfg = copy.deepcopy(DEFAULT_CONFIG)
+    loaded_user = False
     if CONFIG_PATH.exists():
         try:
             user = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             cfg = normalize_config(user)
+            loaded_user = True
         except Exception as e:
             print(f"配置读取失败，使用默认配置：{e}")
-    # —— 旧配置迁移：历史版本把 max_dim 写成 2200（当时默认值），比现默认 1600 慢一倍多，
-    #    会让后续所有 OCR 提速优化失效。超过当前默认的旧值一律拉回默认。
-    try:
-        ocr_cfg = cfg.get("ocr", {})
-        default_max = DEFAULT_CONFIG["ocr"]["max_dim"]
-        if int(ocr_cfg.get("max_dim", default_max)) > default_max:
-            ocr_cfg["max_dim"] = default_max
-        # 线程数超过 CPU 核数没有收益（超订阅反而更慢），且每线程一份 OCR 模型占内存
-        cpu = os.cpu_count() or 4
-        if int(cfg.get("workers", 4)) > cpu:
-            cfg["workers"] = cpu
-    except Exception:
-        pass
+    if loaded_user:
+        # —— 旧配置迁移：历史版本默认把 max_dim 写成 2200，比现默认 1600 慢一倍多；
+        #    仅迁移历史默认值 2200，保留用户显式设定的其他合法数值。
+        try:
+            ocr_cfg = cfg.get("ocr", {})
+            default_max = DEFAULT_CONFIG["ocr"]["max_dim"]
+            if int(ocr_cfg.get("max_dim", default_max)) == 2200:
+                ocr_cfg["max_dim"] = default_max
+            # 线程数超过 CPU 核数没有收益（超订阅反而更慢），但至少保留默认值 4 以兼容低核环境预期
+            cpu = max(4, os.cpu_count() or 4)
+            if int(cfg.get("workers", 4)) > cpu:
+                cfg["workers"] = cpu
+        except Exception:
+            pass
     return cfg
 
 
@@ -311,11 +315,19 @@ class Cache:
         return False
 
     def get(self, path: str, size: int, mtime: float, version=None):
+        ver = self.result_version if version is None else version
+        norm_p = os.path.normcase(path)
         with self.lock:
-            row = self.conn.execute(
-                "SELECT verdict, score, reasons, ocr_text FROM results WHERE path=? AND size=? AND mtime=? AND cfg_hash=?",
-                (path, size, mtime, self.result_version if version is None else version),
-            ).fetchone()
+            if norm_p == path:
+                row = self.conn.execute(
+                    "SELECT verdict, score, reasons, ocr_text FROM results WHERE path=? AND size=? AND mtime=? AND cfg_hash=?",
+                    (norm_p, size, mtime, ver),
+                ).fetchone()
+            else:
+                row = self.conn.execute(
+                    "SELECT verdict, score, reasons, ocr_text FROM results WHERE path IN (?,?) AND size=? AND mtime=? AND cfg_hash=?",
+                    (norm_p, path, size, mtime, ver),
+                ).fetchone()
         if row and row[0] != 'error':
             reasons_raw = row[2]
             return {"verdict": row[0], "score": row[1],
@@ -324,29 +336,39 @@ class Cache:
         return None
 
     def get_batch(self, file_infos: list[tuple[str, int, float]], version=None) -> dict[str, dict]:
-        """批量查询缓存：path+size+mtime 命中则返回 {path: result}。用于扫描秒开。
+        """批量查询缓存：path+size+mtime 命中则返回 {path: result}（兼容 Windows 盘符与路径大小写差异）。
         分批查询：SQLite 的 SQL 变量数上限（32766）在大目录（数万张图）会被突破，
         一旦 OperationalError 冒出去整个扫描线程就崩了。"""
         if not file_infos:
             return {}
-        want = {(p, s, m) for p, s, m in file_infos}
+        ver = self.result_version if version is None else version
+        want_by_norm: dict[str, list[tuple[str, int, float]]] = {}
+        for p, s, m in file_infos:
+            want_by_norm.setdefault(os.path.normcase(p), []).append((p, s, m))
         out: dict[str, dict] = {}
-        BATCH = 500
+        BATCH = 400
         for i in range(0, len(file_infos), BATCH):
-            chunk = [p for p, _, _ in file_infos[i:i + BATCH]]
-            ph = ",".join("?" * len(chunk))
+            query_keys = list(dict.fromkeys(
+                k for p, _, _ in file_infos[i:i + BATCH] for k in (os.path.normcase(p), p)
+            ))
+            ph = ",".join("?" * len(query_keys))
             with self.lock:
                 rows = self.conn.execute(
                     f"SELECT path, size, mtime, verdict, score, reasons, ocr_text FROM results WHERE path IN ({ph}) AND cfg_hash=?",
-                    chunk + [self.result_version if version is None else version],
+                    query_keys + [ver],
                 ).fetchall()
-            # Python 侧按 size+mtime 精确过滤（SQLite 不支持 tuple IN VALUES）
             for r in rows:
-                if (r[0], r[1], r[2]) in want and r[3] != 'error':
-                    reasons_raw = r[5]
-                    out[r[0]] = {"verdict": r[3], "score": r[4],
-                                 "reasons": [] if reasons_raw == "[]" else json.loads(reasons_raw),
-                                 "ocr_text": r[6], "_stat": (r[1], r[2])}
+                if r[3] == 'error':
+                    continue
+                candidates = want_by_norm.get(os.path.normcase(r[0]))
+                if not candidates:
+                    continue
+                for orig_p, s, m in candidates:
+                    if r[1] == s and r[2] == m:
+                        reasons_raw = r[5]
+                        out[orig_p] = {"verdict": r[3], "score": r[4],
+                                       "reasons": [] if reasons_raw == "[]" else json.loads(reasons_raw),
+                                       "ocr_text": r[6], "_stat": (r[1], r[2])}
         return out
 
     def clear_results(self):
@@ -356,53 +378,70 @@ class Cache:
             self.conn.commit()
 
     def put_hash(self, path: str, size: int, mtime: float, hash_val: int):
-        """dHash 指纹缓存（相似聚类用，path+size+mtime 键）。"""
+        """dHash 指纹缓存（相似聚类用，normcase(path)+size+mtime 键）。"""
+        norm_p = os.path.normcase(path)
         with self.lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO hashes VALUES(?,?,?,?)",
-                (path, size, mtime, hash_val if hash_val < (1 << 63) else hash_val - (1 << 64)),
+                (norm_p, size, mtime, hash_val if hash_val < (1 << 63) else hash_val - (1 << 64)),
             )
 
     def put_hashes_batch(self, entries: list[tuple[str, int, float, int]]):
         if not entries:
             return
-        rows = [(p, s, m, h if h < (1 << 63) else h - (1 << 64)) for p, s, m, h in entries]
+        rows = [(os.path.normcase(p), s, m, h if h < (1 << 63) else h - (1 << 64)) for p, s, m, h in entries]
         with self.lock:
             self.conn.executemany("INSERT OR REPLACE INTO hashes VALUES(?,?,?,?)", rows)
 
     def get_hash(self, path: str, size: int, mtime: float):
+        norm_p = os.path.normcase(path)
         with self.lock:
-            row = self.conn.execute(
-                "SELECT hash FROM hashes WHERE path=? AND size=? AND mtime=?",
-                (path, size, mtime),
-            ).fetchone()
+            if norm_p == path:
+                row = self.conn.execute(
+                    "SELECT hash FROM hashes WHERE path=? AND size=? AND mtime=?",
+                    (norm_p, size, mtime),
+                ).fetchone()
+            else:
+                row = self.conn.execute(
+                    "SELECT hash FROM hashes WHERE path IN (?,?) AND size=? AND mtime=?",
+                    (norm_p, path, size, mtime),
+                ).fetchone()
         return (row[0] & ((1 << 64) - 1)) if row else None
 
     def get_hashes_batch(self, file_infos: list[tuple[str, int, float]]) -> dict[str, int]:
         if not file_infos:
             return {}
-        want = {(p, s, m) for p, s, m in file_infos}
+        want_by_norm: dict[str, list[tuple[str, int, float]]] = {}
+        for p, s, m in file_infos:
+            want_by_norm.setdefault(os.path.normcase(p), []).append((p, s, m))
         out: dict[str, int] = {}
         mask64 = (1 << 64) - 1
-        BATCH = 500
+        BATCH = 400
         for i in range(0, len(file_infos), BATCH):
-            chunk = [p for p, _, _ in file_infos[i:i + BATCH]]
-            ph = ",".join("?" * len(chunk))
+            query_keys = list(dict.fromkeys(
+                k for p, _, _ in file_infos[i:i + BATCH] for k in (os.path.normcase(p), p)
+            ))
+            ph = ",".join("?" * len(query_keys))
             with self.lock:
                 rows = self.conn.execute(
-                    f"SELECT path, size, mtime, hash FROM hashes WHERE path IN ({ph})", chunk
+                    f"SELECT path, size, mtime, hash FROM hashes WHERE path IN ({ph})", query_keys
                 ).fetchall()
             for r in rows:
-                if (r[0], r[1], r[2]) in want:
-                    out[r[0]] = r[3] & mask64
+                candidates = want_by_norm.get(os.path.normcase(r[0]))
+                if not candidates:
+                    continue
+                for orig_p, s, m in candidates:
+                    if r[1] == s and r[2] == m:
+                        out[orig_p] = r[3] & mask64
         return out
 
     def put(self, path: str, size: int, mtime: float, verdict: str, score: float, reasons: list, ocr_text: str, version=None):
         reasons_str = "[]" if not reasons else json.dumps(reasons, ensure_ascii=False)
+        norm_p = os.path.normcase(path)
         with self.lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO results VALUES(?,?,?,?,?,?,?,?,?)",
-                (path, size, mtime, verdict, score, reasons_str, ocr_text, time.time(),
+                (norm_p, size, mtime, verdict, score, reasons_str, ocr_text, time.time(),
                  self.result_version if version is None else version),
             )
 
@@ -537,6 +576,45 @@ def is_blank_image(img: Image.Image) -> bool:
     return all(low == high for low, high in rgb.getextrema())
 
 
+def _pil_to_rgb(im: Image.Image) -> Image.Image:
+    """无损安全转 8-bit RGB：
+    1) 普通不透明 RGB/L/CMYK/YCbCr 保持原生快速路径，零额外开销；
+    2) 16-bit / 浮点灰度图（I;16 / I / F）按动态范围线性映射到 0..255，避免 Pillow 直接截断成全白；
+    3) 含透明通道的贴纸/水印/二维码（RGBA / LA / PA / P+transparency）按前景明度合成到对比衬底，
+       避免黑字透明底或白字透明底在丢弃 Alpha 后变成纯黑/纯白导致漏检与黑块预览。"""
+    mode = im.mode
+    if mode == "RGB":
+        return im.copy()
+    if mode.startswith("I;16") or mode in ("I", "F"):
+        import numpy as np
+        arr = np.asarray(im, dtype=np.float32)
+        if arr.size:
+            finite = np.nan_to_num(arr, nan=0.0, posinf=65535.0, neginf=0.0)
+            hi = float(finite.max())
+            if mode.startswith("I;16") or hi > 255.0:
+                scale = (255.0 / 65535.0) if hi <= 65535.0 else (255.0 / hi)
+                finite = finite * scale
+            elif mode == "F" and 0.0 < hi <= 1.0:
+                finite = finite * 255.0
+            u8 = np.clip(finite, 0.0, 255.0).astype(np.uint8)
+        else:
+            u8 = arr.astype(np.uint8)
+        return Image.fromarray(u8).convert("RGB")
+    if mode in ("RGBA", "LA", "PA") or (mode == "P" and "transparency" in im.info):
+        rgba = im if mode == "RGBA" else im.convert("RGBA")
+        lo, _ = rgba.getchannel("A").getextrema()
+        if lo < 255:
+            import numpy as np
+            arr = np.asarray(rgba)
+            fg = arr[:, :, :3][arr[:, :, 3] > 16]
+            # 若前景几乎全为高亮浅色（如透明底白色水印贴纸），衬深色底以保留轮廓与提亮对比；否则衬白底
+            bg_color = (48, 48, 52, 255) if (fg.size and float(fg.mean()) > 220.0) else (255, 255, 255, 255)
+            bg = Image.new("RGBA", rgba.size, bg_color)
+            return Image.alpha_composite(bg, rgba).convert("RGB")
+        return rgba.convert("RGB")
+    return im.convert("RGB")
+
+
 def load_pixel_image(path: Path, max_dim: int) -> Image.Image:
     """为 QR/OCR 加载像素；JPEG 走 draft 快速降采样解码。
     必须 with：Image.open 持有文件句柄，扫描几千张不关闭会耗尽句柄/锁住文件。"""
@@ -545,7 +623,7 @@ def load_pixel_image(path: Path, max_dim: int) -> Image.Image:
             im.draft("RGB", (max_dim, max_dim))
         except Exception:
             pass
-        img = im.convert("RGB")
+        img = _pil_to_rgb(im)
     if max(img.size) > max_dim:
         img = ImageOps.contain(img, (max_dim, max_dim))
     return img
@@ -566,9 +644,10 @@ def load_display_image(path: Path, max_dim=None):
             except Exception:
                 pass
         try:
-            image = ImageOps.exif_transpose(im).convert('RGB')
+            transposed = ImageOps.exif_transpose(im)
+            image = _pil_to_rgb(transposed)
         except Exception:
-            image = im.convert('RGB')
+            image = _pil_to_rgb(im)
     if max_dim is not None and max(image.size) > max_dim:
         image = ImageOps.contain(image, (max_dim, max_dim))
     return image, original
@@ -826,7 +905,7 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict,
                         im.draft("RGB", (max_dim, max_dim))
                     except Exception:
                         pass
-                    img = im.convert("RGB")
+                    img = _pil_to_rgb(im)
             if img is not None and max(img.size) > max_dim:
                 img = ImageOps.contain(img, (max_dim, max_dim))
         except Exception as e:
@@ -1380,6 +1459,46 @@ def _journal_quarantine_move(root, item, size):
         os.fsync(stream.fileno())
 
 
+def _clear_readonly(path: Path) -> None:
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    except OSError:
+        pass
+
+
+def _safe_unlink(path: str | Path) -> None:
+    try:
+        os.remove(path)
+    except PermissionError:
+        _clear_readonly(Path(path))
+        os.remove(path)
+
+
+def _safe_move(src: Path, dst: Path) -> None:
+    try:
+        shutil.move(str(src), str(dst))
+    except PermissionError:
+        _clear_readonly(src)
+        if dst.exists() and src.exists():
+            # 跨盘移动已完成复制但因源文件只读未能删除源文件，或残留半截目标文件
+            try:
+                if dst.stat().st_size == src.stat().st_size:
+                    os.remove(src)
+                    return
+                _safe_unlink(dst)
+            except OSError:
+                pass
+        shutil.move(str(src), str(dst))
+    except Exception:
+        if dst.exists() and src.exists():
+            try:
+                if dst.stat().st_size != src.stat().st_size:
+                    _safe_unlink(dst)
+            except OSError:
+                pass
+        raise
+
+
 def _root_label(root_path: Path) -> str:
     if root_path.name:
         return root_path.name
@@ -1437,7 +1556,7 @@ def apply_quarantine(items: list[dict], roots: list[str], quarantine_root: Path,
                 'time': time.strftime('%F %T'), 'reasons': it.get('reasons', [])}, quarantine_root)
             st = src.lstat() if src.is_symlink() else src.stat()
             _journal_quarantine_move(quarantine_root, entry, st.st_size)
-            shutil.move(str(src), str(dst))
+            _safe_move(src, dst)
             manifest['items'].append(entry)
             moved += 1
             ok_paths.append(str(src))
@@ -1475,7 +1594,7 @@ def apply_delete(items: list[dict], log_fn) -> tuple[int, list[str], list[str]]:
     errors, moved, ok_paths = [], 0, []
     for it in items:
         try:
-            os.remove(it["path"])
+            _safe_unlink(it["path"])
             log_fn({"action": "delete", "src": it["path"]})
             moved += 1
             ok_paths.append(it["path"])
@@ -1574,7 +1693,7 @@ def restore_quarantine_items(quarantine_root: Path, dsts: list[str], log_fn) -> 
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst = _unique_destination(dst, '还原')
-            shutil.move(str(src), str(dst))
+            _safe_move(src, dst)
             log_fn({"action": "restore", "dst": str(dst)})
             restored += 1
         except Exception as e:
@@ -1601,7 +1720,7 @@ def delete_quarantine_items(quarantine_root: Path, dsts: list[str], log_fn) -> t
         try:
             p = Path(it["dst"])
             if p.exists():
-                os.remove(p)
+                _safe_unlink(p)
             log_fn({"action": "quarantine_delete", "dst": it["dst"]})
             deleted += 1
         except Exception as e:
@@ -1616,10 +1735,26 @@ def delete_quarantine_items(quarantine_root: Path, dsts: list[str], log_fn) -> t
     return deleted, errors
 
 
+_LOG_LOCK = threading.Lock()
+_LOG_MAX_BYTES = 5 * 1024 * 1024
+_LOG_KEEP_BYTES = 2 * 1024 * 1024
+
+
 def log_jsonl(entry: dict):
     try:
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps({**entry, "ts": time.strftime("%F %T")}, ensure_ascii=False) + "\n")
+        line = json.dumps({**entry, "ts": time.strftime("%F %T")}, ensure_ascii=False) + "\n"
+        with _LOG_LOCK:
+            if LOG_PATH.exists() and LOG_PATH.stat().st_size > _LOG_MAX_BYTES:
+                raw = LOG_PATH.read_bytes()
+                tail = raw[-_LOG_KEEP_BYTES:]
+                nl = tail.find(b"\n")
+                if nl >= 0:
+                    tail = tail[nl + 1:]
+                tmp = LOG_PATH.with_suffix(".jsonl.tmp")
+                tmp.write_bytes(tail)
+                os.replace(tmp, LOG_PATH)
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line)
     except Exception:
         pass
 
@@ -1652,12 +1787,12 @@ def dhash_bits(path: Path, cache: Cache | None = None) -> int | None:
             except Exception:
                 pass
             w, h = im.size
-            if im.mode in ("RGB", "RGBA", "P", "L") and max(w, h) > 400:
+            if im.mode in ("RGB", "L") and max(w, h) > 400:
                 try:
                     im = im.reduce(4)  # 块平均快速降采样：PNG 大图不必全尺寸参与 resize
                 except Exception:
                     pass
-            img = im.convert("L")
+            img = im.convert("L") if im.mode in ("RGB", "L") else _pil_to_rgb(im).convert("L")
         g = img.resize((9, 8))
         px = g.tobytes()
         bits = 0
@@ -1672,7 +1807,11 @@ def dhash_bits(path: Path, cache: Cache | None = None) -> int | None:
         return None
 
 
-def cluster_similar(paths: list[str], threshold: int = 6, cache: Cache | None = None) -> list[list[str]]:
+_POPCOUNT_U8 = None
+
+
+def cluster_similar(paths: list[str], threshold: int = 6, cache: Cache | None = None,
+                    *, stats: dict[str, tuple[int, float]] | None = None) -> list[list[str]]:
     """贪心代表聚类：与已有组代表指纹距离 ≤ 阈值入组，否则自成新组。
     只返回成员 ≥2 的组。贪心代表法不传递合并，避免链式漂移把不相似的串到一起。"""
     from concurrent.futures import ThreadPoolExecutor
@@ -1692,6 +1831,12 @@ def cluster_similar(paths: list[str], threshold: int = 6, cache: Cache | None = 
         infos: list[tuple[str, int, float]] = []
         stat_map: dict[str, tuple[int, float]] = {}
         for p in unique_paths:
+            known = stats.get(p) if stats else None
+            if known is not None:
+                p_str = str(Path(p))
+                infos.append((p_str, known[0], known[1]))
+                stat_map[p] = known
+                continue
             try:
                 st = Path(p).stat()
                 p_str = str(Path(p))
@@ -1734,23 +1879,58 @@ def cluster_similar(paths: list[str], threshold: int = 6, cache: Cache | None = 
     parts = threshold + 1 if 0 <= threshold <= 10 else 0
     blocks = [(64*i//parts, 64*(i+1)//parts - 64*i//parts) for i in range(parts)]
     indexes = [{} for _ in blocks]
+    reps_np = None
+    reps_cap = 0
+    if not parts:
+        import numpy as np
+        global _POPCOUNT_U8
+        if _POPCOUNT_U8 is None:
+            _POPCOUNT_U8 = np.array([i.bit_count() for i in range(256)], dtype=np.uint8)
+        reps_cap = min(max(64, len(unique_paths)), 1024)
+        reps_np = np.empty(reps_cap, dtype=np.uint64)
+
     for p in unique_paths:
         h = hash_map.get(p)
         if h is None:
             continue
-        candidates = set()
-        for index, (shift, width) in zip(indexes, blocks):
-            candidates.update(index.get((h >> shift) & ((1 << width) - 1), ()))
-        for gi in sorted(candidates) if parts else range(len(groups)):
-            rep, members = groups[gi]
-            if (h ^ rep).bit_count() <= threshold:
-                members.append(p)
-                break
-        else:
-            gi = len(groups)
-            groups.append((h, [p]))
+        if parts:
+            candidates = set()
             for index, (shift, width) in zip(indexes, blocks):
-                index.setdefault((h >> shift) & ((1 << width) - 1), []).append(gi)
+                candidates.update(index.get((h >> shift) & ((1 << width) - 1), ()))
+            for gi in sorted(candidates):
+                rep, members = groups[gi]
+                if (h ^ rep).bit_count() <= threshold:
+                    members.append(p)
+                    break
+            else:
+                gi = len(groups)
+                groups.append((h, [p]))
+                for index, (shift, width) in zip(indexes, blocks):
+                    index.setdefault((h >> shift) & ((1 << width) - 1), []).append(gi)
+        else:
+            n_g = len(groups)
+            if n_g >= 64:
+                xor_bytes = (reps_np[:n_g] ^ np.uint64(h)).view(np.uint8).reshape(n_g, 8)
+                hits = np.flatnonzero(_POPCOUNT_U8[xor_bytes].sum(axis=1) <= threshold)
+                if hits.size:
+                    groups[int(hits[0])][1].append(p)
+                    continue
+            else:
+                matched = False
+                for gi in range(n_g):
+                    if (h ^ groups[gi][0]).bit_count() <= threshold:
+                        groups[gi][1].append(p)
+                        matched = True
+                        break
+                if matched:
+                    continue
+            if n_g >= reps_cap:
+                reps_cap = max(reps_cap * 2, n_g + 64)
+                grown = np.empty(reps_cap, dtype=np.uint64)
+                grown[:n_g] = reps_np[:n_g]
+                reps_np = grown
+            reps_np[n_g] = np.uint64(h)
+            groups.append((h, [p]))
     return [members for _, members in groups if len(members) >= 2]
 
 

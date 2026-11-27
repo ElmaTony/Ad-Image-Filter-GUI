@@ -58,6 +58,8 @@ class ThumbCache(QObject):
         self._sig_store.connect(self._on_store)
         self._size = size
         self._max = max_items
+        scr = QApplication.primaryScreen() if QApplication.instance() else None
+        self._dpr = max(1.0, min(2.5, float(scr.devicePixelRatio()) if scr is not None else 1.0))
         self._cache: "OrderedDict[str, QPixmap]" = OrderedDict()
         self._pending: set = set()
         self._failed: set = set()
@@ -83,6 +85,15 @@ class ThumbCache(QObject):
         self._q.put((generation, path))
         return None
 
+    def invalidate(self, paths):
+        if not paths:
+            return
+        with self._lock:
+            for p in paths:
+                self._cache.pop(p, None)
+                self._pending.discard(p)
+                self._failed.discard(p)
+
     def clear(self):
         with self._lock:
             self._generation += 1
@@ -103,29 +114,34 @@ class ThumbCache(QObject):
                 continue
             try:
                 from PIL import ImageOps
-                img, _ = af.load_display_image(Path(path), self._size)
-                if img.width > 240 or img.height > 210:
-                    img = ImageOps.contain(img, (240, 210))
+                dpr = self._dpr
+                tw = max(1, int(round(252 * dpr)))
+                th = max(1, int(round(220 * dpr)))
+                decode_dim = max(self._size, tw, th)
+                img, _ = af.load_display_image(Path(path), decode_dim)
+                if img.width > tw or img.height > th:
+                    img = ImageOps.contain(img, (tw, th))
                 try:
-                    self._sig_store.emit((generation, path, img.tobytes(), img.width, img.height, False))
+                    self._sig_store.emit((generation, path, img.tobytes(), img.width, img.height, False, dpr))
                 except RuntimeError:
                     return  # 对象已销毁（关窗瞬间）
             except Exception:
                 try:
-                    self._sig_store.emit((generation, path, None, 0, 0, True))
+                    self._sig_store.emit((generation, path, None, 0, 0, True, 1.0))
                 except RuntimeError:
                     return
 
     def _on_store(self, data):
-        generation, path, buf, w, h, failed = data
+        generation, path, buf, w, h, failed = data[:6]
+        dpr = data[6] if len(data) > 6 else 1.0
         if generation != self._generation:
             return
         if failed:
             self._mark_failed(path)
         else:
-            self._store(path, buf, w, h)
+            self._store(path, buf, w, h, dpr)
 
-    def _store(self, path, buf, w, h):
+    def _store(self, path, buf, w, h, dpr=1.0):
         if w <= 0 or h <= 0 or not buf:
             self._mark_failed(path)
             return
@@ -134,6 +150,8 @@ class ThumbCache(QObject):
         if pm.isNull():
             self._mark_failed(path)
             return
+        if dpr > 1.0:
+            pm.setDevicePixelRatio(dpr)
         with self._lock:
             self._cache[path] = pm
             while len(self._cache) > self._max:
@@ -159,6 +177,7 @@ class ResultModel(QAbstractListModel):
     def __init__(self):
         super().__init__()
         self.items: list = []
+        self._item_by_path: dict = {}
         self.checked: set = set()
         self.sim_map: dict = {}
         self.sim_groups: list = []
@@ -313,7 +332,8 @@ class CardDelegate(QStyledItemDelegate):
         p.fillRect(img_r, _qc(CDST.c(dark, CDSTT.surface3)))
         pix = self.thumbs.get(it["path"])
         if pix is not None and not pix.isNull():
-            pw, ph = pix.width(), pix.height()
+            dpr_p = max(1.0, float(pix.devicePixelRatioF()))
+            pw, ph = pix.width() / dpr_p, pix.height() / dpr_p
             if pw > 0 and ph > 0:
                 scale = min(img_r.width() / pw, img_r.height() / ph)
                 dw, dh = max(1, int(round(pw * scale))), max(1, int(round(ph * scale)))
@@ -726,7 +746,7 @@ class TitleBar(QWidget):
         self.logo = QLabel(self)                    # AD 应用图标（标题栏与系统图标同步）
         self.logo.setObjectName("titleLogo")
         self.logo.setFixedSize(16, 16)
-        self.logo.setPixmap(app_icon_pixmap(16))
+        self.logo.setPixmap(app_icon_pixmap(16, self.devicePixelRatioF()))
         self.logo.setStyleSheet("background: transparent;")
         self.brand = QLabel("", self)
         self.brand.setObjectName("titleBrand")
@@ -897,14 +917,18 @@ class Lightbox(QWidget):
         self._original_size = (0, 0)
         self._full_loaded = self._full_pending = False
         self._load(path)
-        # 底部右侧：图内直接处置按钮（A 标广告 / K 保留）
+        # 底部右侧：图内直接处置按钮（A 标广告 / K 保留），跟随当前激活主题色盘
         self.btn_ad = QPushButton("标记广告 (A)", self)
         self.btn_ad.setCursor(Qt.PointingHandCursor)
+        ar, ag, ab = CDST.accent_rgb(True)
+        ad_fg = CDST.c(True, CDSTT.text_on_clay)
+        ad_hov = CDST.c(True, CDST.CLAY_HOVER)
         self.btn_ad.setStyleSheet(
-            "QPushButton { background: rgba(198,97,63,0.92); color: #fff; border: none;"
-            " border-radius: 14px; padding: 6px 16px; font-size: 12px; }"
-            "QPushButton:hover { background: rgba(217,119,87,1.0); }")
+            f"QPushButton {{ background: rgba({ar},{ag},{ab},0.92); color: {ad_fg}; border: none;"
+            f" border-radius: 14px; padding: 6px 16px; font-size: 12px; font-weight: 600; }}"
+            f"QPushButton:hover {{ background: {ad_hov}; }}")
         self.btn_ad.clicked.connect(lambda: self._mark(True))
+        self._sync_mark_btn()
         self.btn_keep = QPushButton("保留 (K)", self)
         self.btn_keep.setCursor(Qt.PointingHandCursor)
         self.btn_keep.setStyleSheet(
@@ -947,6 +971,11 @@ class Lightbox(QWidget):
 
     enter = Property(float, get_enter, set_enter)
 
+    def _sync_mark_btn(self):
+        if hasattr(self, "btn_ad"):
+            checked = self.path in getattr(self.app, "checked", ())
+            self.btn_ad.setText("✓ 已标广告 (A)" if checked else "标记广告 (A)")
+
     def _load(self, path):
         self.path = path
         self.setWindowTitle(f'大图查看 · {Path(path).name}')
@@ -957,6 +986,7 @@ class Lightbox(QWidget):
         self._loader.request(path, 2400)
         self.scale = 1.0
         self.tx = self.ty = 0.0
+        self._sync_mark_btn()
         self.update()
 
     def _loaded(self, result):
@@ -990,11 +1020,13 @@ class Lightbox(QWidget):
         super().closeEvent(event)
 
     def _it(self):
+        if hasattr(self.app, "_get_item"):
+            return self.app._get_item(self.path)
         return next((x for x in self.app.items if x["path"] == self.path), None)
 
     def _place_mark_btns(self):
         y = self.height() - 46
-        w_ad, w_keep = 108, 84
+        w_ad, w_keep = 118, 84
         self.btn_keep.setGeometry(self.width() - 18 - w_keep, y, w_keep, 32)
         self.btn_ad.setGeometry(self.width() - 18 - w_keep - 10 - w_ad, y, w_ad, 32)
         self.btn_ad.raise_()
@@ -1017,6 +1049,7 @@ class Lightbox(QWidget):
 
     def _mark(self, as_ad):
         self.app.mark_path(self.path, as_ad)
+        self._sync_mark_btn()
         self.update()
         if not as_ad:
             # 保留 = 移出结果列表：自动跳到下一张，没有则关闭
@@ -1536,6 +1569,7 @@ class App(FramelessWindow):
         self.setAcceptDrops(True)
 
         self.items: list = []
+        self._item_by_path: dict = {}
         self.checked: set = set()
         self._selected_only = False
         self._filters_before_selected = None
@@ -2186,6 +2220,7 @@ class App(FramelessWindow):
                 kept_items.append(it)
         if removed_paths:
             self.items = kept_items
+            self._rebuild_item_index()
             self._pending_rows = [it for it in self._pending_rows if it["path"] not in removed_paths]
             for p in removed_paths:
                 self.model.checked.discard(p)
@@ -2491,6 +2526,7 @@ class App(FramelessWindow):
         self._sweep_timer.stop()
         self.thumbs.clear()
         self.items.clear()
+        self._item_by_path.clear()
         self._selected_only = False
         self._filters_before_selected = None
         self._scan_outcome = None
@@ -2603,6 +2639,7 @@ class App(FramelessWindow):
                             self._stat_cache[payload["path"]] = st_pair
                         self._had_review_hits = True
                         self.items.append(payload)
+                        self._item_by_path[payload["path"]] = payload
                         self._review_totals[payload['verdict']] += 1
                         items_batch.append(payload)
                 elif kind == "progress":
@@ -2709,7 +2746,9 @@ class App(FramelessWindow):
                     self._undo_batch = (q_root_str, list(ok_paths))
                     self._undo_dsts = list(ok_dsts) if ok_dsts else None
                 pset = set(ok_paths)
+                self.thumbs.invalidate(pset)
                 self.items = [it for it in self.items if it["path"] not in pset]
+                self._rebuild_item_index()
                 for p in pset:
                     self.model.checked.discard(p)
                 self.checked = self.model.checked
@@ -2724,12 +2763,14 @@ class App(FramelessWindow):
                 self._log("处置（" + {"quarantine": "隔离", "recycle": "回收站", "delete": "删除"}.get(mode, mode) + "）" + msg)
                 self._toast(msg, ok=not errors)
                 if errors:
-                    self._info("处置结果", msg + "\n" + "\n".join(errors[:5]))
+                    more = f"\n…另有 {len(errors) - 5} 项失败（详见操作日志）" if len(errors) > 5 else ""
+                    self._info("处置结果", msg + "\n" + "\n".join(errors[:5]) + more)
             if restored is not None:
                 restored_n, errors = restored[0], restored[1]
                 retry_batch = restored[2] if len(restored) > 2 else None
                 retry_dsts = restored[3] if len(restored) > 3 else None
                 self._disposing = False
+                self.thumbs.clear()
                 if retry_batch:
                     self._undo_batch = retry_batch
                     self._undo_dsts = retry_dsts
@@ -2737,18 +2778,22 @@ class App(FramelessWindow):
                 self._log(f"从隔离区恢复 {restored_n} 张" + (f"（{len(errors)} 张失败）" if errors else ""))
                 self._toast(f"恢复完成：{restored_n} 张", ok=not errors)
                 if errors:
-                    self._info("恢复结果", "\n".join(errors[:5]))
+                    more = f"\n…另有 {len(errors) - 5} 项失败（详见操作日志）" if len(errors) > 5 else ""
+                    self._info("恢复结果", "\n".join(errors[:5]) + more)
             if similar is not None:
                 self._apply_similar(similar)
             if qop is not None:
                 self._file_busy = False
                 verb, n, errors = qop
+                if verb == "还原" and n > 0:
+                    self.thumbs.clear()
                 if n > 0 and self._undo_batch is not None:
                     self._refresh_undo_batch()
                 self._log(f"隔离区{verb}：{n} 项" + (f"，{len(errors)} 项失败" if errors else ""))
                 self._toast(f"隔离区{verb}完成：{n} 项", ok=not errors)
                 if errors:
-                    self._info(f"隔离区{verb}结果", "\n".join(errors[:5]))
+                    more = f"\n…另有 {len(errors) - 5} 项失败（详见操作日志）" if len(errors) > 5 else ""
+                    self._info(f"隔离区{verb}结果", "\n".join(errors[:5]) + more)
                 dlg = getattr(self, "_qdlg", None)
                 if dlg is not None:
                     try:
@@ -2884,7 +2929,20 @@ class App(FramelessWindow):
             return sorted(items, key=lambda it: (self._stat(it["path"]) or (0, 0))[1], reverse=True)
         return sorted(items, key=lambda it: it.get("score", 0), reverse=True)
 
+    def _rebuild_item_index(self):
+        self._item_by_path = {it["path"]: it for it in self.items}
+
+    def _get_item(self, path: str):
+        if len(self._item_by_path) != len(self.items):
+            self._rebuild_item_index()
+        it = self._item_by_path.get(path)
+        if it is None and any(x["path"] == path for x in self.items):
+            self._rebuild_item_index()
+            it = self._item_by_path.get(path)
+        return it
+
     def refresh(self):
+        self._rebuild_item_index()
         self._review_totals = {v: 0 for v in ('ad', 'suspect', 'error')}
         norm_roots = [af._norm_root(r) for r in self.get_roots()] if self.items else None
         for item in self.items:
@@ -2969,7 +3027,14 @@ class App(FramelessWindow):
         self.pill_hit.setAlignment(Qt.AlignCenter)
         self.pill_hit.setStyleSheet(
             f"#countPill {{ {CDST.pill_qss(d, 'gray', radius=11, pad='1px 9px')} }}")
-        picked = [it for it in self.items if it['path'] in self.checked] if self.checked else []
+        if len(self._item_by_path) != len(self.items):
+            self._rebuild_item_index()
+        if not self.checked:
+            picked = []
+        elif len(self.checked) <= len(self._item_by_path):
+            picked = [self._item_by_path[p] for p in self.checked if p in self._item_by_path]
+        else:
+            picked = [it for it in self.items if it['path'] in self.checked]
         n_sel = len(picked) if self.items else len(self.checked)
         size = sum((self._stat(it['path']) or (0, 0))[0] for it in picked) / 1048576
         visible = sum(it['path'] in self.checked for it in self.model.items) if self.checked else 0
@@ -3016,14 +3081,20 @@ class App(FramelessWindow):
             if getattr(self, '_dispose_css', None) != css:
                 setCustomStyleSheet(self.btn_dispose, css, css)
                 self._dispose_css = css
-            self._sync_actions()
+            self._sync_actions(has_checked=bool(picked))
 
-    def _sync_actions(self):
+    def _sync_actions(self, *, has_checked=None):
         if not hasattr(self, 'btn_dispose'):
             return
         scanning = self._scan_running()
         busy = self._disposing or self._file_busy
-        has_checked = any(it['path'] in self.checked for it in self.items) if self.checked else False
+        if has_checked is None:
+            if not self.checked:
+                has_checked = False
+            elif len(self._item_by_path) == len(self.items) and len(self.checked) <= len(self._item_by_path):
+                has_checked = any(p in self._item_by_path for p in self.checked)
+            else:
+                has_checked = any(it['path'] in self.checked for it in self.items)
         self.btn_scan.setEnabled(not scanning and not busy)
         self.btn_pause.setEnabled(scanning and not self.cancel.is_set())
         self.btn_cancel.setEnabled(scanning and not self.cancel.is_set())
@@ -3070,10 +3141,11 @@ class App(FramelessWindow):
         paths = [it["path"] for it in self.items]
         thr = int(self.cfg.get("phash", {}).get("threshold", 6))
         generation = self._scan_generation
+        known_stats = {k: v for k, v in getattr(self, "_stat_cache", {}).items() if v is not None}
 
         def work():
             try:
-                groups = af.cluster_similar(paths, thr, self._cache)
+                groups = af.cluster_similar(paths, thr, self._cache, stats=known_stats)
             except Exception:
                 return
             self.scan_q.put(("similar", (generation, groups)))
@@ -3110,7 +3182,7 @@ class App(FramelessWindow):
         if not path:
             return
         self._preview_path = path
-        it = next((x for x in self.items if x["path"] == path), None)
+        it = self._get_item(path)
         if not it:
             return
         self.detail_filename.setText(Path(path).name)
@@ -3132,10 +3204,11 @@ class App(FramelessWindow):
         self.info.setPlainText(info)
         self._paint_detail_badge(it)
 
+        dpr = max(1.0, min(3.0, float(self.devicePixelRatioF())))
         tw = max(200, self.preview.width() - 6)
         th = max(120, self.preview.height() - 6)
 
-        self._preview_loader.request(path, max(tw, th, 720))
+        self._preview_loader.request(path, int(round(max(tw, th, 720) * dpr)))
 
     def _preview_loaded(self, result):
         generation, path, data, w, h, _, _, error = result
@@ -3144,9 +3217,14 @@ class App(FramelessWindow):
         if data is None:
             self._on_preview_err((path, error))
             return
+        dpr = max(1.0, min(3.0, float(self.devicePixelRatioF())))
+        tw = max(1, int(round(max(200, self.preview.width() - 6) * dpr)))
+        th = max(1, int(round(max(120, self.preview.height() - 6) * dpr)))
         image = QImage(data, w, h, w*3, QImage.Format_RGB888).copy()
-        self._pix = QPixmap.fromImage(image).scaled(max(200, self.preview.width()-6),
-            max(120, self.preview.height()-6), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._pix = QPixmap.fromImage(image).scaled(
+            tw, th, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if dpr > 1.0:
+            self._pix.setDevicePixelRatio(dpr)
         self.preview.setPixmap(self._pix)
 
     def _on_preview_err(self, msg):
@@ -3271,6 +3349,7 @@ class App(FramelessWindow):
         else:
             gone = cur["path"]
             self.items = [x for x in self.items if x["path"] != gone]
+            self._item_by_path.pop(gone, None)
             self._pending_rows = [x for x in self._pending_rows if x["path"] != gone]
             self.model.checked.discard(gone)
             self.checked = self.model.checked
@@ -3286,7 +3365,7 @@ class App(FramelessWindow):
 
     def mark_path(self, path, as_ad):
         """按路径标记（Lightbox 内处置用）：广告=勾选，保留=移出结果列表。"""
-        it = next((x for x in self.items if x["path"] == path), None)
+        it = self._get_item(path)
         if not it:
             return self
         if as_ad:
@@ -3297,6 +3376,7 @@ class App(FramelessWindow):
             self._log(f"标记广告：{Path(path).name}")
         else:
             self.items = [x for x in self.items if x["path"] != path]
+            self._item_by_path.pop(path, None)
             self._pending_rows = [x for x in self._pending_rows if x["path"] != path]
             self.model.checked.discard(path)
             self.checked = self.model.checked
@@ -3526,6 +3606,10 @@ class App(FramelessWindow):
         path, _ok = QFileDialog.getSaveFileName(self, "导出报告", default, "CSV 文件 (*.csv)")
         if not path:
             return self
+        def _csv_cell(val):
+            s = str(val).replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+            return ("'" + s) if s.startswith(("=", "+", "-", "@", "\t")) else s
+
         import csv
         try:
             norm_roots = [af._norm_root(r) for r in self.get_roots()]
@@ -3535,9 +3619,10 @@ class App(FramelessWindow):
                 for it in items:
                     self._ensure_folder_label(it, norm_roots)
                     reasons = "; ".join(h.get("label", "") for h in it.get("reasons", []))
-                    w.writerow([Path(it["path"]).name, it["path"], it.get("_folder", ""),
+                    w.writerow([_csv_cell(Path(it["path"]).name), _csv_cell(it["path"]),
+                                _csv_cell(it.get("_folder", "")),
                                 VERDICT_TEXT.get(it["verdict"], it["verdict"]),
-                                f"{it.get('score', 0):.0f}", reasons])
+                                f"{it.get('score', 0):.0f}", _csv_cell(reasons)])
         except OSError as exc:
             self._info("导出失败", f"无法写入文件：\n{path}\n{exc}")
             self._log(f"导出报告失败：{exc}")
@@ -4023,6 +4108,20 @@ class RuleEditorLite(WorkbenchDialog):
         t.setMinimumHeight(260)
         return {"page": page, "table": t, "weight": with_weight, "label": label}
 
+    @staticmethod
+    def _commit_table_edits(t):
+        if t is None:
+            return
+        from PySide6.QtWidgets import QAbstractItemDelegate
+        if t.state() == QAbstractItemView.EditingState:
+            editor = t.focusWidget()
+            if editor is not None and editor is not t and editor is not t.viewport():
+                try:
+                    t.commitData(editor)
+                    t.closeEditor(editor, QAbstractItemDelegate.NoHint)
+                except Exception:
+                    pass
+
     def _collect_rules(self):
         """从三个表格实时收集规则（含未保存的编辑；无效正则/权重跳过）。"""
         out = {}
@@ -4030,6 +4129,7 @@ class RuleEditorLite(WorkbenchDialog):
             t = pg.get("table")
             if t is None:
                 continue
+            self._commit_table_edits(t)
             rules = []
             for r in range(t.rowCount()):
                 pat_it, lab_it = t.item(r, 0), t.item(r, 1)
@@ -4075,6 +4175,22 @@ class RuleEditorLite(WorkbenchDialog):
         self.t_out.setReadOnly(True)
         self.t_out.setMinimumHeight(150)
         lay.addWidget(self.t_out, 1)
+        d = isDarkTheme()
+        accent = CDST.c(d, CDSTT.clay)
+        accent_h = CDST.c(d, CDST.CLAY_HOVER)
+        on_accent = CDST.c(d, CDSTT.text_on_clay)
+        btn_qss = (
+            f"PrimaryPushButton {{ background:{accent}; color:{on_accent}; border:none; border-radius:8px; padding:6px 16px; }}"
+            f"PrimaryPushButton:hover {{ background:{accent_h}; }}"
+            f"PrimaryPushButton:pressed {{ background:{accent}; }}"
+        )
+        te_qss = (
+            f"TextEdit {{ background:{CDST.c(d, CDSTT.surface2)}; border:1px solid {CDST.c(d, CDSTT.border)};"
+            f" border-radius:8px; color:{CDST.c(d, CDSTT.text)}; }}"
+        )
+        setCustomStyleSheet(btn, btn_qss, btn_qss)
+        setCustomStyleSheet(self.t_in, te_qss, te_qss)
+        setCustomStyleSheet(self.t_out, te_qss, te_qss)
         return {"page": page, "label": "规则测试器"}
 
     def _run_test(self):
@@ -4136,6 +4252,7 @@ class RuleEditorLite(WorkbenchDialog):
             if "table" not in pg:
                 continue
             t, with_weight, label = pg["table"], pg["weight"], pg["label"]
+            self._commit_table_edits(t)
             rules = []
             for r in range(t.rowCount()):
                 pat_it, lab_it = t.item(r, 0), t.item(r, 1)
@@ -4407,8 +4524,12 @@ class QuarantineDialog(WorkbenchDialog):
         self._run(af.delete_quarantine_items, dsts, "删除")
 
     def _restore_all(self):
-        self._run(af.restore_quarantine_items,
-                  [e["dst"] for e in self.entries], "还原")
+        dsts = [e["dst"] for e in self.entries]
+        if not dsts:
+            return
+        if not self.app._ask("全部还原", f"将把当前隔离区的 {len(dsts)} 个文件全部还原回原位置\n继续？"):
+            return
+        self._run(af.restore_quarantine_items, dsts, "还原")
 
 
 # ================================================================ 入口
@@ -4435,16 +4556,24 @@ def _qc(css) -> "QColor":
 _ICON_IMAGE = None
 
 
-def app_icon_pixmap(size: int = 64) -> "QPixmap":
-    """应用图标：圆角陶土橙底 + 白色扫帚 + 清扫星点。
+def app_icon_pixmap(size: int = 64, dpr: float = 0.0) -> "QPixmap":
+    """应用图标：圆角陶土橙底 + 白色扫帚 + 清扫星点（支持高 DPI 物理像素渲染）。
     数据 base64 内嵌于 icon_embed.py——onefile 打包自包含，无需外部文件。"""
     global _ICON_IMAGE
     if _ICON_IMAGE is None:
         import base64
         from icon_embed import ICON_B64
         _ICON_IMAGE = QImage.fromData(base64.b64decode(ICON_B64), "PNG")
-    return QPixmap.fromImage(_ICON_IMAGE).scaled(
-        size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    if dpr <= 0:
+        scr = QApplication.primaryScreen() if QApplication.instance() else None
+        dpr = float(scr.devicePixelRatio()) if scr is not None else 1.0
+    dpr = max(1.0, min(3.0, float(dpr)))
+    px = max(1, int(round(size * dpr)))
+    pm = QPixmap.fromImage(_ICON_IMAGE).scaled(
+        px, px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    if dpr > 1.0:
+        pm.setDevicePixelRatio(dpr)
+    return pm
 
 
 def run_gui(return_app=False):
@@ -4453,14 +4582,29 @@ def run_gui(return_app=False):
     cfg = af.load_config()
     CDST.set_palette(cfg.get("ui_palette", CDST.DEFAULT_PALETTE))
     setThemeColor(CDST.c(cfg.get("ui_theme") == "dark", CDSTT.clay))
-    qapp.setWindowIcon(QIcon(app_icon_pixmap(256)))   # 任务栏/系统显示的窗口图标
+    qapp.setWindowIcon(QIcon(app_icon_pixmap(256, 1.0)))   # 任务栏/系统显示的窗口图标
     app = App(cfg)
     app._cache = af.Cache(af.CACHE_PATH)
     app._cache.check_config_version(cfg)
     if return_app:
         return app
     app.show()
-    sys.exit(qapp.exec())   # 主事件循环——缺了它窗口一闪而过（exe 闪退根因）
+    exit_code = 0
+    try:
+        exit_code = qapp.exec()
+    finally:
+        try:
+            if app.scan_thread and app.scan_thread.is_alive():
+                app.cancel.set()
+                app.scan_thread.join(timeout=1.5)
+        except Exception:
+            pass
+        try:
+            app._cache.commit()
+            app._cache.close()
+        except Exception:
+            pass
+    sys.exit(exit_code)   # 主事件循环——缺了它窗口一闪而过（exe 闪退根因）
 
 
 # ================================================================ GUI 功能自测（v6 网格）
