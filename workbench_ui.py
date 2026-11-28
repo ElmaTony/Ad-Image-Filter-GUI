@@ -492,7 +492,9 @@ def build_workbench(app):
     app.seg_disposal.setFixedWidth(210)
     app.seg_disposal.setToolTip('隔离可撤销；回收站由系统恢复；删除不可恢复')
     app.btn_dq, app.btn_dr, app.btn_dd = app.seg_disposal._btns
-    app.seg_disposal.valueChanged.connect(lambda _: app._update_count_label())
+    disposal_idx = {'quarantine': 0, 'recycle': 1, 'delete': 2}.get(app.cfg.get('disposal', 'quarantine'), 0)
+    app.seg_disposal.set_index(disposal_idx, animate=False)
+    app.seg_disposal.valueChanged.connect(app._on_disposal_changed)
     controls.addWidget(app.seg_disposal)
     controls.addWidget(button('btn_undo', '撤销处置', app.undo_disposal, bot, FIF.BACK_TO_WINDOW))
     app.btn_undo.setEnabled(False)

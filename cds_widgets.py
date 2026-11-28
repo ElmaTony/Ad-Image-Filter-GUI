@@ -144,11 +144,11 @@ class CDSToast(QFrame):
 
 # ============================================================ 命令面板（Ctrl+K）
 class CDSCommandPalette(QWidget):
-    """浮层：输入框 + 结果列表；↑↓ 选择，Enter/单击 执行，Esc 关闭。"""
+    """浮层：输入框 + 结果列表；↑↓ 选择，Enter/单击 执行，Esc 或点击外部关闭。"""
 
     def __init__(self, parent, commands):
         super().__init__(parent)
-        self.cmds = commands          # [(显示名, 回调), ...]
+        self.cmds = commands          # [(显示名, 回调), ...] 或 [(显示名, 回调, 是否可用), ...]
         self.dark = getattr(parent, 'theme', 'light') == 'dark'
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setWindowFlags(Qt.Widget)
@@ -185,10 +185,23 @@ class CDSCommandPalette(QWidget):
         self._escape = QShortcut(QKeySequence('Esc'), self)
         self._escape.setContext(Qt.WidgetWithChildrenShortcut)
         self._escape.activated.connect(self.close)
+        self._host = parent
+        if parent is not None:
+            parent.installEventFilter(self)
         self._filter("")
         self.refresh_theme(self.dark)
         self.reposition(parent)
         self.edit.setFocus()
+
+    def closeEvent(self, event):
+        host = getattr(self, "_host", None)
+        if host is not None:
+            try:
+                host.removeEventFilter(self)
+            except RuntimeError:
+                pass
+            self._host = None
+        super().closeEvent(event)
 
     def reposition(self, parent):
         if parent is None:
@@ -224,20 +237,30 @@ class CDSCommandPalette(QWidget):
     def _filter(self, q):
         self.list.clear()
         ql = q.strip().lower()
-        for name, fn in self.cmds:
+        first_enabled = -1
+        for entry in self.cmds:
+            name, fn = entry[0], entry[1]
+            enabled = bool(entry[2]) if len(entry) > 2 else True
             if ql and ql not in name.lower():
                 continue
-            it = QListWidgetItem(name)
+            it = QListWidgetItem(name if enabled else f"{name}（当前不可用）")
             it.setData(Qt.UserRole, fn)
+            it.setData(Qt.UserRole + 1, enabled)
+            if not enabled:
+                it.setFlags(it.flags() & ~Qt.ItemIsEnabled)
+            elif first_enabled < 0:
+                first_enabled = self.list.count()
             self.list.addItem(it)
-        if self.list.count():
+        if first_enabled >= 0:
+            self.list.setCurrentRow(first_enabled)
+        elif self.list.count():
             self.list.setCurrentRow(0)
 
     def _run_current(self):
         if not self.isVisible():
             return
         it = self.list.currentItem()
-        if it is None:
+        if it is None or it.data(Qt.UserRole + 1) is False:
             return
         fn = it.data(Qt.UserRole)
         self.close()
@@ -253,6 +276,10 @@ class CDSCommandPalette(QWidget):
             super().keyPressEvent(e)
 
     def eventFilter(self, watched, event):
+        if watched is getattr(self, "_host", None) and event.type() == QEvent.MouseButtonPress:
+            if self.isVisible() and not self.geometry().contains(event.position().toPoint()):
+                self.close()
+            return False
         if watched is self.edit and event.type() == QEvent.KeyPress:
             if event.key() == Qt.Key_Escape:
                 self.close()

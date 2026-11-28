@@ -55,20 +55,30 @@ try {
     $body = @{ tag_name=$releaseTag; target_commitish=$commit; name=$releaseTitle; body=$notes; draft=$true; prerelease=$false } | ConvertTo-Json
     $release = Invoke-RestMethod -Method Post -Uri "$api/releases" -Headers $headers -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType 'application/json; charset=utf-8'
     Write-Output ('已创建发行草稿：' + $release.id)
-    # GitHub 会规范化中文附件名；明确使用 ASCII 名称上传，无须复制出第二个 EXE。
-    $upload = "https://uploads.github.com/repos/ElmaTony/Ad-Image-Filter-GUI/releases/$($release.id)/assets?name=AdImageFilter-Windows-x64.exe"
-    $asset = Invoke-RestMethod -Method Post -Uri $upload -Headers $headers -InFile $exe -ContentType 'application/octet-stream' -TimeoutSec $UploadTimeoutSec
-    $expected = 'sha256:' + (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($asset.state -ne 'uploaded' -or $asset.size -ne (Get-Item -LiteralPath $exe).Length -or $asset.digest -ne $expected) {
-        throw '附件核对失败，发行版保留为草稿。'
+    try {
+        # GitHub 会规范化中文附件名；明确使用 ASCII 名称上传，无须复制出第二个 EXE。
+        $upload = "https://uploads.github.com/repos/ElmaTony/Ad-Image-Filter-GUI/releases/$($release.id)/assets?name=AdImageFilter-Windows-x64.exe"
+        $asset = Invoke-RestMethod -Method Post -Uri $upload -Headers $headers -InFile $exe -ContentType 'application/octet-stream' -TimeoutSec $UploadTimeoutSec
+        $expected = 'sha256:' + (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($asset.state -ne 'uploaded' -or $asset.size -ne (Get-Item -LiteralPath $exe).Length -or $asset.digest -ne $expected) {
+            throw '附件核对失败，将清理未发布的发行草稿。'
+        }
+        $body = @{draft=$false; make_latest='true'} | ConvertTo-Json
+        $published = Invoke-RestMethod -Method Patch -Uri "$api/releases/$($release.id)" -Headers $headers -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType 'application/json; charset=utf-8'
+        if ($published.draft -or $published.tag_name -cne $releaseTag -or $published.name -cne $releaseTitle -or
+            $published.body.Trim() -cne $notes.Trim()) { throw '发行版本或说明核对失败。' }
+        $publishedAsset = $published.assets | Where-Object { $_.id -eq $asset.id }
+        if (-not $publishedAsset -or $publishedAsset.digest -ne $expected) { throw '公开发行版的附件核对失败。' }
+        [PSCustomObject]@{ Tag=$published.tag_name; Url=$published.html_url; Download=$publishedAsset.browser_download_url; Verified=$true }
+    } catch {
+        try {
+            Invoke-RestMethod -Method Delete -Uri "$api/releases/$($release.id)" -Headers $headers | Out-Null
+            Write-Warning "已自动清理失败的发行草稿：$($release.id)"
+        } catch {
+            Write-Warning "发行草稿 $($release.id) 清理失败，请手动在 GitHub Releases 删除。"
+        }
+        throw
     }
-    $body = @{draft=$false; make_latest='true'} | ConvertTo-Json
-    $published = Invoke-RestMethod -Method Patch -Uri "$api/releases/$($release.id)" -Headers $headers -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType 'application/json; charset=utf-8'
-    if ($published.draft -or $published.tag_name -cne $releaseTag -or $published.name -cne $releaseTitle -or
-        $published.body.Trim() -cne $notes.Trim()) { throw '发行版本或说明核对失败。' }
-    $publishedAsset = $published.assets | Where-Object { $_.id -eq $asset.id }
-    if (-not $publishedAsset -or $publishedAsset.digest -ne $expected) { throw '公开发行版的附件核对失败。' }
-    [PSCustomObject]@{ Tag=$published.tag_name; Url=$published.html_url; Download=$publishedAsset.browser_download_url; Verified=$true }
 } finally {
     $headers = $null
     $credential = $null

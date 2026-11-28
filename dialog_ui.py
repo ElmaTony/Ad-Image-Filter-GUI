@@ -160,7 +160,8 @@ def navigation(dialog, entries):
     return body
 
 
-def style_dialog(dialog):
+def refresh_dialog_theme(dialog):
+    """刷新配套弹窗的表面色、输入控件与主操作按钮样式（可安全重复调用）。"""
     dark = isDarkTheme()
     c = lambda token: T.c(dark, token)
     surface, panel, text, muted, border = [c(x) for x in
@@ -203,6 +204,13 @@ def style_dialog(dialog):
     )
     if not getattr(dialog, '_custom_yes_style', False):
         setCustomStyleSheet(dialog.yesButton, primary_qss, primary_qss)
+
+
+def style_dialog(dialog):
+    refresh_dialog_theme(dialog)
+    if getattr(dialog, '_chrome_built', False):
+        return
+    dialog._chrome_built = True
     # 将旧版正文中的标题与说明移到固定页头，其余内容可滚动。
     title = dialog.viewLayout.takeAt(0).widget()
     title.setObjectName('dialogTitle')
@@ -250,10 +258,15 @@ def style_dialog(dialog):
         available = dialog.geometry()
     width = max(320, min(dialog.width(), available.width() - 40))
     dialog.setMinimumWidth(width)
-    dialog.setMaximumWidth(width)
     dialog.setMinimumHeight(0)
-    height = max(220, min(getattr(dialog, 'preferred_height', 660), available.height() - 48))
-    dialog.setMaximumHeight(height)
+    height = max(200, min(getattr(dialog, 'preferred_height', 660), available.height() - 48))
+    if getattr(dialog, 'resizable', False):
+        dialog.setMaximumWidth(max(width, available.width() - 24))
+        dialog.setMaximumHeight(max(height, available.height() - 32))
+        dialog.setSizeGripEnabled(True)
+    else:
+        dialog.setMaximumWidth(width)
+        dialog.setMaximumHeight(height)
     dialog.resize(width, height)
 
 
@@ -556,13 +569,15 @@ class NoticeDialog(WorkbenchDialog):
     def __init__(self, parent, title, content, confirmation=True):
         super().__init__(parent)
         self.setFixedWidth(540)
-        self.preferred_height = 340
         self.header_description = False
         self.viewLayout.addWidget(QLabel(title, self))
         text = QLabel(content, self)
         text.setWordWrap(True)
         text.setTextFormat(Qt.PlainText)
         text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        text.setFixedWidth(492)
+        text_h = max(48, text.sizeHint().height())
+        self.preferred_height = max(210, min(420, 175 + text_h))
         self.viewLayout.addWidget(text)
         self.viewLayout.addStretch()
         self.yesButton.setText('继续' if confirmation else '知道了')

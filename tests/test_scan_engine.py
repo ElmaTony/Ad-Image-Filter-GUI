@@ -62,7 +62,7 @@ class ScanEngineTests(unittest.TestCase):
         self.assertFalse(self.cache.check_config_version(self.cfg))
         self.assertIsNone(self.cache.get('one', 1, 1))
 
-    def test_small_image_reuses_inference_but_preserves_accumulated_text(self):
+    def test_small_image_reuses_inference_but_deduplicates_accumulated_text(self):
         path = self.files(1)[0]
         self.enable['ocr'] = True
         self.cfg['ocr']['bright_thresholds'] = []
@@ -70,7 +70,7 @@ class ScanEngineTests(unittest.TestCase):
             result = af.analyze_file(path, self.cfg, self.cache, self.enable)
         self.assertEqual(inference.call_count, 1)
         self.assertEqual(result['verdict'], 'suspect')
-        self.assertEqual(result['ocr_text'], '频道频道')
+        self.assertEqual(result['ocr_text'], '频道')
         self.assertEqual(result['score'], 1)
 
     def test_inference_failure_is_visible_and_never_cached_as_clean(self):
@@ -471,6 +471,100 @@ class ScanEngineTests(unittest.TestCase):
         lines = log_file.read_text(encoding='utf-8').splitlines()
         self.assertGreaterEqual(len(lines), 2)
         self.assertEqual(json.loads(lines[-1])['idx'], 19)
+
+    def test_tall_comic_strip_animated_gif_and_naked_domain_qr(self):
+        import qrcode
+        # 1) 竖长图（900x12000）底部附带二维码，缩放整图后若不抽首尾必漏检，首尾高清保护应命中
+        tall = Image.new('RGB', (900, 12000), 'white')
+        qr = qrcode.QRCode(border=2, box_size=8)
+        qr.add_data('www.example.com/join')
+        qr.make(fit=True)
+        qimg = qr.make_image(fill_color='black', back_color='white').convert('RGB').resize((300, 300))
+        tall.paste(qimg, (300, 11600))
+        tall_path = self.root / 'tall_comic.png'
+        tall.save(tall_path)
+        res_tall = af.analyze_file(tall_path, self.cfg, self.cache, dict(filename=False, shape=True, qr=True, ocr=False))
+        self.assertEqual(res_tall['verdict'], 'ad')
+
+        # 2) 多帧 GIF：首帧全黑、末帧藏有推广二维码
+        f0 = Image.new('RGB', (400, 400), (0, 0, 0))
+        f1 = Image.new('RGB', (400, 400), (255, 255, 255))
+        f1.paste(qimg.resize((260, 260)), (70, 70))
+        gif_path = self.root / 'anim_ad.gif'
+        f0.save(gif_path, save_all=True, append_images=[f1], duration=100, loop=0)
+        res_gif = af.analyze_file(gif_path, self.cfg, self.cache, dict(filename=False, shape=True, qr=True, ocr=False))
+        self.assertEqual(res_gif['verdict'], 'ad')
+
+        # 3) 普通文本码保留 suspect 并附带明文 detail
+        qr_txt = qrcode.QRCode(border=2, box_size=8)
+        qr_txt.add_data('GroupID-8899')
+        qr_txt.make(fit=True)
+        txt_path = self.root / 'plain_qr.png'
+        qr_txt.make_image(fill_color='black', back_color='white').convert('RGB').resize((320, 320)).save(txt_path)
+        res_txt = af.analyze_file(txt_path, self.cfg, self.cache, dict(filename=False, shape=False, qr=True, ocr=False))
+        self.assertEqual(res_txt['verdict'], 'suspect')
+        self.assertEqual(res_txt['reasons'][0].get('detail'), 'GroupID-8899')
+
+    def test_ocr_sentence_boundary_and_cross_box_isolation(self):
+        hits_en, score_en, _ = af.score_ocr_texts(['Wait. Come here', 'Hello. Net guide'], self.cfg['ocr_keywords'])
+        self.assertEqual((hits_en, score_en), ([], 0.0))
+
+        hits_cross, score_cross, _ = af.score_ocr_texts(['欢迎进入', '人群之中'], self.cfg['ocr_keywords'])
+        self.assertEqual((hits_cross, score_cross), ([], 0.0))
+
+        hits_domain, score_domain, _ = af.score_ocr_texts(['Visit example.com now'], self.cfg['ocr_keywords'])
+        self.assertEqual(score_domain, 3.0)
+        self.assertTrue(hits_domain)
+
+    def test_multi_config_cache_coexistence_prune_and_partial_quarantine_resilience(self):
+        p = self.files(1)[0]
+        sw_a = dict(filename=True, shape=False, qr=False, ocr=False)
+        sw_b = dict(filename=True, shape=False, qr=False, ocr=True)
+        self.cache.check_config_version(self.cfg, sw_a)
+        self.cache.put(str(p), 100, 1.0, 'clean', 0, [], '', af.result_signature(self.cfg, sw_a))
+        self.cache.commit()
+        self.cache.check_config_version(self.cfg, sw_b)
+        self.cache.put(str(p), 100, 1.0, 'ad', 90, [{'type': 'ocr', 'label': 'OCR'}], 't.me',
+                       af.result_signature(self.cfg, sw_b))
+        self.cache.commit()
+        # 切换回配置 A 仍保留缓存命中
+        self.assertIsNotNone(self.cache.get(str(p), 100, 1.0, af.result_signature(self.cfg, sw_a)))
+        self.assertIsNotNone(self.cache.get(str(p), 100, 1.0, af.result_signature(self.cfg, sw_b)))
+
+        # prune 容量裁剪
+        for i in range(10):
+            self.cache.put(f'row_{i}', 1, float(i), 'clean', 0, [], '')
+        self.cache.commit()
+        self.cache.prune(max_rows=5, keep_rows=4)
+        cnt = self.cache.conn.execute('SELECT COUNT(*) FROM results').fetchone()[0]
+        self.assertLessEqual(cnt, 4)
+
+        # 单条半截冲突不阻断同批其他已隔离条目读写
+        photos = self.root / 'q_src'
+        photos.mkdir()
+        ok_file = photos / 'ok.jpg'
+        bad_file = photos / 'bad.jpg'
+        ok_file.write_bytes(b'good')
+        bad_file.write_bytes(b'bad')
+        qdir = self.root / 'q_partial'
+        real_move = af._safe_move
+
+        def flaky_move(src, dst):
+            if src.name == 'bad.jpg':
+                dst.write_bytes(b'half')
+                raise OSError('simulated cross-volume error')
+            return real_move(src, dst)
+
+        with patch.object(af, '_safe_move', side_effect=flaky_move):
+            moved, errors, ok_paths = af.apply_quarantine(
+                [{'path': str(ok_file)}, {'path': str(bad_file)}], [str(photos)], qdir, lambda _: None
+            )
+        self.assertEqual((moved, ok_paths), (1, [str(ok_file)]))
+        self.assertTrue(errors)
+        entries = af.list_quarantine(qdir)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(af.restore_quarantine(qdir, lambda _: None), (1, []))
+        self.assertTrue(ok_file.exists())
 
 
 if __name__ == '__main__':

@@ -73,13 +73,13 @@ DEFAULT_CONFIG = {
         {"pattern": r"预览_|宣传图|推广图|广告图|banner", "label": "文件名推广词"},
     ],
     "ocr_keywords": [
-        {"pattern": r"t\.me|telegram|https?://|www\.[a-z0-9]|\.com|\.net|\.cc|\.vip|\.xyz", "weight": 3, "label": "链接"},
+        {"pattern": r"t\.me|telegram|https?://|www\.[a-z0-9]|(?:\.com|\.net|\.cc|\.vip|\.xyz)(?![a-z])", "weight": 3, "label": "链接"},
         {"pattern": r"免费发布|免费领取|免费看|资源由|不收费|没有门槛|无门槛|浏览器搜|进我的频道|我的频道|关注公众号|加微信|加QQ|扫码关注|独家首发|入群|粉丝群|投稿", "weight": 3, "label": "推广话术"},
         {"pattern": r"@[A-Za-z0-9_]{4,}", "weight": 2, "label": "@渠道号"},
         {"pattern": r"频道", "weight": 1, "label": "弱词"},  # “免费/发布”实测在正常图高频误伤，只留“频道”
     ],
     "whitelist_rules": [],
-    "shape": {"max_ratio": 3.0, "max_ratio_hard": 8.0, "min_side": 300},
+    "shape": {"max_ratio_hard": 8.0, "min_side": 300},
     "qr": {"enabled": True},
     "ocr": {
         "enabled": False,
@@ -88,7 +88,6 @@ DEFAULT_CONFIG = {
         "bright_thresholds": [200],  # 单提亮：实测较 [200,170] 提速 47% 且 17 张样本零漏检
         "max_dim": 1600,  # OCR 输入缩放上限；2200 太慢，1600 精度损失可控、提速约 30%
         "score_high": 6,
-        "score_low": 3,
     },
     "workers": 4,
     "disposal": "quarantine",
@@ -129,12 +128,17 @@ def normalize_config(user: dict) -> dict:
     number(cfg, 'workers', 1, 256, True)
     number(cfg['phash'], 'threshold', 0, 64, True)
     number(cfg['shape'], 'min_side', 1, 100000, True)
-    for key in ('max_ratio', 'max_ratio_hard'):
-        number(cfg['shape'], key, 1, 100000)
+    number(cfg['shape'], 'max_ratio_hard', 1, 100000)
+    if 'max_ratio' in cfg['shape']:
+        number(cfg['shape'], 'max_ratio', 1, 100000)
+        cfg['shape'].pop('max_ratio', None)
     for key, low, high, integer in (
             ('strip_ratio', .001, 1, False), ('max_dim', 32, 100000, True),
-            ('score_high', .001, 1000000, False), ('score_low', .001, 1000000, False)):
+            ('score_high', .001, 1000000, False)):
         number(cfg['ocr'], key, low, high, integer)
+    if 'score_low' in cfg['ocr']:
+        number(cfg['ocr'], 'score_low', .001, 1000000)
+        cfg['ocr'].pop('score_low', None)
     thresholds = cfg['ocr']['bright_thresholds']
     if not isinstance(thresholds, list):
         raise ValueError('bright_thresholds 须为数字列表')
@@ -159,7 +163,7 @@ def normalize_config(user: dict) -> dict:
                 raise ValueError('规则名称须为文本')
             if key == 'ocr_keywords':
                 rule.setdefault('weight', 1)
-                number(rule, 'weight', 1, 10000)
+                number(rule, 'weight', 1, 10000, True)
     if cfg['disposal'] not in ('quarantine', 'recycle', 'delete'):
         raise ValueError('处置方式无效')
     qdir = cfg['quarantine_dir']
@@ -199,7 +203,7 @@ def load_config() -> dict:
             if int(ocr_cfg.get("max_dim", default_max)) == 2200:
                 ocr_cfg["max_dim"] = default_max
             # 线程数超过 CPU 核数没有收益（超订阅反而更慢），但至少保留默认值 4 以兼容低核环境预期
-            cpu = max(4, os.cpu_count() or 4)
+            cpu = max(4, min(16, os.cpu_count() or 4))
             if int(cfg.get("workers", 4)) > cpu:
                 cfg["workers"] = cpu
         except Exception:
@@ -213,7 +217,12 @@ def result_signature(cfg, enable=None):
                     qr=enable.get('qr', False), ocr=enable.get('ocr', False)) if enable is not None else dict(
         filename=cfg.get('_enable_filename', True), shape=cfg.get('_enable_shape', True),
         qr=cfg['qr']['enabled'], ocr=cfg['ocr']['enabled'])
-    blob = dict(config={k: cfg.get(k) for k in keys}, enable=switches, revision=3 if switches['qr'] else 2)
+    conf = {k: copy.deepcopy(cfg.get(k)) for k in keys}
+    if isinstance(conf.get('shape'), dict):
+        conf['shape'].pop('max_ratio', None)
+    if isinstance(conf.get('ocr'), dict):
+        conf['ocr'].pop('score_low', None)
+    blob = dict(config=conf, enable=switches, revision=4 if switches['qr'] else 2)
     return hashlib.sha256(json.dumps(blob, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
 
 
@@ -239,7 +248,15 @@ def _write_json_atomic(path: Path, data) -> None:
 
 
 _WS_RE = re.compile(r"\s+")
-_QR_LINK_RE = re.compile(r"t\.me|http|telegram")
+_HWS_MULTI_RE = re.compile(r"[^\S\n]+")
+_ASCII_GAP_RE = re.compile(r"(?<=[A-Za-z0-9]) (?=[A-Za-z0-9])")
+_DOT_GAP_RE = re.compile(r"([A-Za-z]{2,}\.) (?=[A-Za-z])")
+_QR_LINK_RE = re.compile(
+    r"t\.me|https?://|http|telegram|(?:weixin|wxp|mqqapi|alipays)://|www\.[a-z0-9-]+"
+    r"|(?:^|[^a-z0-9@])[a-z0-9-]+\.(?:com|net|org|cn|cc|vip|xyz|top|me|io|tv|gg|app|club|site|online|link|work|shop)(?:[/\?#:\s]|$)",
+    re.I,
+)
+_QR_COMPACT_LINK_RE = re.compile(r"t\.me|http|telegram")
 
 
 @lru_cache(maxsize=512)
@@ -247,13 +264,25 @@ def _compile_rule_re(pattern: str):
     return re.compile(pattern, re.I)
 
 
+def _normalize_line(line: str) -> str:
+    line = _HWS_MULTI_RE.sub(" ", line).strip()
+    if not line:
+        return ""
+    # 保留两个 ASCII 词及“英文单词+句点+英文单词”间的空格，避免跨词粘连引发 .com 误报或漏检
+    line = _ASCII_GAP_RE.sub("\x00", line)
+    line = _DOT_GAP_RE.sub("\\1\x00", line)
+    return line.replace(" ", "").replace("\x00", " ").lower()
+
+
 def normalize_text(s: str) -> str:
     if not s:
         return ""
-    if s.isascii():
-        return _WS_RE.sub("", s).lower()
-    s = unicodedata.normalize("NFKC", s)
-    return _WS_RE.sub("", s).lower()
+    if not s.isascii():
+        s = unicodedata.normalize("NFKC", s)
+    if "\n" not in s:
+        return _normalize_line(s)
+    lines = [part for raw in s.splitlines() if (part := _normalize_line(raw))]
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------- 缓存
@@ -270,25 +299,48 @@ class Cache:
                 pass
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS results(
-                    path TEXT PRIMARY KEY, size INTEGER, mtime REAL,
-                    verdict TEXT, score REAL, reasons TEXT, ocr_text TEXT, ts REAL)"""
+                    path TEXT, size INTEGER, mtime REAL,
+                    verdict TEXT, score REAL, reasons TEXT, ocr_text TEXT, ts REAL,
+                    cfg_hash TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (path, cfg_hash))"""
             )
             self.conn.execute(
                 "CREATE TABLE IF NOT EXISTS hashes(path TEXT PRIMARY KEY, size INTEGER, mtime REAL, hash INTEGER)"
             )
             self.conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
-            if 'cfg_hash' not in {row[1] for row in self.conn.execute('PRAGMA table_info(results)')}:
+            cols = list(self.conn.execute("PRAGMA table_info(results)"))
+            col_names = {row[1] for row in cols}
+            pk_cols = {row[1] for row in cols if row[5] > 0}
+            if 'cfg_hash' not in col_names:
                 try:
                     self.conn.execute("ALTER TABLE results ADD COLUMN cfg_hash TEXT NOT NULL DEFAULT ''")
                 except sqlite3.OperationalError:
-                    if 'cfg_hash' not in {row[1] for row in self.conn.execute('PRAGMA table_info(results)')}:
+                    cols = list(self.conn.execute("PRAGMA table_info(results)"))
+                    col_names = {row[1] for row in cols}
+                    if 'cfg_hash' not in col_names:
                         raise
+            if cols and pk_cols != {'path', 'cfg_hash'}:
+                self.conn.execute(
+                    """CREATE TABLE IF NOT EXISTS results_v2(
+                        path TEXT, size INTEGER, mtime REAL,
+                        verdict TEXT, score REAL, reasons TEXT, ocr_text TEXT, ts REAL,
+                        cfg_hash TEXT NOT NULL DEFAULT '',
+                        PRIMARY KEY (path, cfg_hash))"""
+                )
+                self.conn.execute(
+                    """INSERT OR REPLACE INTO results_v2(path, size, mtime, verdict, score, reasons, ocr_text, ts, cfg_hash)
+                       SELECT path, size, mtime, verdict, score, reasons, ocr_text, ts, cfg_hash FROM results"""
+                )
+                self.conn.execute("DROP TABLE results")
+                self.conn.execute("ALTER TABLE results_v2 RENAME TO results")
             self.conn.commit()
         except Exception:
             self.conn.close()
             raise
         self.lock = threading.Lock()
         self.result_version = ''
+        self._writes_since_prune = 0
+        self.prune()
 
     def close(self):
         with self.lock:
@@ -300,16 +352,40 @@ class Cache:
     def __exit__(self, *_exc):
         self.close()
 
+    def prune(self, max_rows: int = 80000, keep_rows: int = 60000):
+        """超出容量上限时按时间/写入顺序淘汰最旧缓存，防止本地缓存无限膨胀。"""
+        with self.lock:
+            n_res = self.conn.execute("SELECT COUNT(*) FROM results").fetchone()[0]
+            changed = False
+            if n_res > max_rows:
+                drop_n = max(0, n_res - keep_rows)
+                if drop_n:
+                    self.conn.execute(
+                        "DELETE FROM results WHERE rowid IN (SELECT rowid FROM results ORDER BY ts ASC LIMIT ?)",
+                        (drop_n,),
+                    )
+                    changed = True
+            n_hash = self.conn.execute("SELECT COUNT(*) FROM hashes").fetchone()[0]
+            if n_hash > max_rows:
+                drop_h = max(0, n_hash - keep_rows)
+                if drop_h:
+                    self.conn.execute(
+                        "DELETE FROM hashes WHERE rowid IN (SELECT rowid FROM hashes ORDER BY rowid ASC LIMIT ?)",
+                        (drop_h,),
+                    )
+                    changed = True
+            if changed:
+                self.conn.commit()
+
     def check_config_version(self, cfg: dict, enable=None) -> bool:
-        """规则/阈值变更后自动清空缓存：旧判定是基于旧规则的，必须全量重判。
-        返回 True=配置未变（缓存有效），False=已清空（需重判）。"""
+        """比对当前配置签名，支持多配置签名并存缓存，不互相破坏历史结果。
+        返回 True=当前签名与上次一致，False=配置已变更（已切换当前签名）。"""
         h = result_signature(cfg, enable)
         with self.lock:
             self.result_version = h
             row = self.conn.execute("SELECT value FROM meta WHERE key='cfg_hash'").fetchone()
             if row and row[0] == h:
                 return True
-            self.conn.execute("DELETE FROM results")
             self.conn.execute("INSERT OR REPLACE INTO meta VALUES('cfg_hash', ?)", (h,))
             self.conn.commit()
         return False
@@ -438,12 +514,19 @@ class Cache:
     def put(self, path: str, size: int, mtime: float, verdict: str, score: float, reasons: list, ocr_text: str, version=None):
         reasons_str = "[]" if not reasons else json.dumps(reasons, ensure_ascii=False)
         norm_p = os.path.normcase(path)
+        need_prune = False
         with self.lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO results VALUES(?,?,?,?,?,?,?,?,?)",
                 (norm_p, size, mtime, verdict, score, reasons_str, ocr_text, time.time(),
                  self.result_version if version is None else version),
             )
+            self._writes_since_prune += 1
+            if self._writes_since_prune >= 2000:
+                self._writes_since_prune = 0
+                need_prune = True
+        if need_prune:
+            self.prune()
 
     def commit(self):
         with self.lock:
@@ -606,7 +689,8 @@ def _pil_to_rgb(im: Image.Image) -> Image.Image:
         if lo < 255:
             import numpy as np
             arr = np.asarray(rgba)
-            fg = arr[:, :, :3][arr[:, :, 3] > 16]
+            sample = arr[::4, ::4] if min(arr.shape[:2]) >= 64 else arr
+            fg = sample[:, :, :3][sample[:, :, 3] > 16]
             # 若前景几乎全为高亮浅色（如透明底白色水印贴纸），衬深色底以保留轮廓与提亮对比；否则衬白底
             bg_color = (48, 48, 52, 255) if (fg.size and float(fg.mean()) > 220.0) else (255, 255, 255, 255)
             bg = Image.new("RGBA", rgba.size, bg_color)
@@ -615,41 +699,59 @@ def _pil_to_rgb(im: Image.Image) -> Image.Image:
     return im.convert("RGB")
 
 
-def load_pixel_image(path: Path, max_dim: int) -> Image.Image:
-    """为 QR/OCR 加载像素；JPEG 走 draft 快速降采样解码。
-    必须 with：Image.open 持有文件句柄，扫描几千张不关闭会耗尽句柄/锁住文件。"""
-    with Image.open(path) as im:
+def _get_exif_orientation(im: Image.Image) -> int:
+    try:
+        return int(im.getexif().get(274, 1) or 1)
+    except Exception:
+        return 1
+
+
+def _decode_bounded_rgb(im: Image.Image, max_dim: int | None, transpose_exif: bool = False,
+                        orient: int | None = None) -> Image.Image:
+    """在安全内存边界内将图像转为 8-bit RGB（按需先做 JPEG draft 与快速整数降采样再合成/转置）。"""
+    if max_dim is not None:
         try:
             im.draft("RGB", (max_dim, max_dim))
         except Exception:
             pass
-        img = _pil_to_rgb(im)
-    if max(img.size) > max_dim:
+        w, h = im.size
+        long_side = max(w, h)
+        if long_side >= max_dim * 2 and im.mode in ("RGB", "RGBA", "L", "LA"):
+            factor = max(1, long_side // (max_dim * 2))
+            if factor >= 2 and min(w, h) // factor >= 32:
+                try:
+                    im = im.reduce(factor)
+                except Exception:
+                    pass
+    if transpose_exif:
+        if orient is None:
+            orient = _get_exif_orientation(im)
+        if orient in (2, 3, 4, 5, 6, 7, 8):
+            try:
+                im = ImageOps.exif_transpose(im)
+            except Exception:
+                pass
+    img = _pil_to_rgb(im)
+    if max_dim is not None and max(img.size) > max_dim:
         img = ImageOps.contain(img, (max_dim, max_dim))
     return img
+
+
+def load_pixel_image(path: Path, max_dim: int) -> Image.Image:
+    """为 QR/OCR 加载像素；JPEG 走 draft 快速降采样，非 JPEG 大图整数缩减防内存暴涨。
+    必须 with：Image.open 持有文件句柄，扫描几千张不关闭会耗尽句柄/锁住文件。"""
+    with Image.open(path) as im:
+        return _decode_bounded_rgb(im, max_dim, transpose_exif=False)
 
 
 def load_display_image(path: Path, max_dim=None):
     """显示专用方向处理；不更改识别通道的像素、尺寸或算法。"""
     with Image.open(path) as im:
         original = im.size
-        try:
-            if im.getexif().get(274) in (5, 6, 7, 8):
-                original = original[::-1]
-        except Exception:
-            pass
-        if max_dim is not None:
-            try:
-                im.draft('RGB', (max_dim, max_dim))
-            except Exception:
-                pass
-        try:
-            transposed = ImageOps.exif_transpose(im)
-            image = _pil_to_rgb(transposed)
-        except Exception:
-            image = _pil_to_rgb(im)
-    if max_dim is not None and max(image.size) > max_dim:
-        image = ImageOps.contain(image, (max_dim, max_dim))
+        orient = _get_exif_orientation(im)
+        if orient in (5, 6, 7, 8):
+            original = original[::-1]
+        image = _decode_bounded_rgb(im, max_dim, transpose_exif=True, orient=orient)
     return image, original
 
 
@@ -775,8 +877,14 @@ def decode_qr_texts(img: Image.Image) -> list[str]:
 
 
 def _qr_link(texts):
-    """返回实际命中的内容，保留现有链接和 Telegram 引流信号。"""
-    return next((text for text in texts if _QR_LINK_RE.search(normalize_text(text))), None)
+    """返回实际命中的链接/裸域名，保留链接和 Telegram/微信等引流信号。"""
+    for text in texts:
+        raw = str(text or "").strip()
+        if not raw:
+            continue
+        if _QR_LINK_RE.search(raw) or _QR_COMPACT_LINK_RE.search(normalize_text(raw)):
+            return raw
+    return None
 
 
 # ---------------------------------------------------------------- 逐图分析
@@ -796,7 +904,15 @@ def match_rules(text: str, rules: list[dict]) -> list[dict]:
 
 
 def score_ocr_texts(texts: list[str], kw_rules: list[dict]) -> tuple[list[dict], float, str]:
-    joined = normalize_text(" ".join(texts))
+    lines: list[str] = []
+    seen: set[str] = set()
+    for raw in texts:
+        norm = normalize_text(str(raw))
+        for part in norm.split("\n"):
+            if part and part not in seen:
+                seen.add(part)
+                lines.append(part)
+    joined = "\n".join(lines)
     hits: list[dict] = []
     total = 0.0
     for rule in kw_rules:
@@ -833,6 +949,33 @@ def _bright_stroke_mask(rgb_arr, thr: int, vmax=None, vmin=None):
     if float(np.count_nonzero(mask)) < min_pixels:
         return None, vmax, vmin
     return mask, vmax, vmin
+
+
+def _extract_frame_inputs(im: Image.Image, orient: int, max_dim: int, strip_ratio: float):
+    """从当前帧提取缩放整图；若是竖长图（条漫/长截图），额外保留未压扁的首尾拼图。"""
+    src = im
+    transposed = False
+    if orient in (2, 3, 4, 5, 6, 7, 8):
+        try:
+            src = ImageOps.exif_transpose(im)
+            transposed = True
+        except Exception:
+            src = im
+    fw, fh = src.size
+    edge_combo = None
+    if fh > fw * 2.5 and fh > max_dim:
+        edge_h = min(fh // 2, max(fw, int(fh * strip_ratio)), fw * 2)
+        if edge_h >= 24:
+            part_cap = max(max_dim // 2, 780)
+            top_part = _decode_bounded_rgb(src.crop((0, 0, fw, edge_h)), part_cap, transpose_exif=False)
+            bot_part = _decode_bounded_rgb(src.crop((0, fh - edge_h, fw, fh)), part_cap, transpose_exif=False)
+            gap = 16
+            cw = max(top_part.width, bot_part.width)
+            edge_combo = Image.new("RGB", (cw, top_part.height + gap + bot_part.height), (255, 255, 255))
+            edge_combo.paste(top_part, (0, 0))
+            edge_combo.paste(bot_part, (0, top_part.height + gap))
+    img = _decode_bounded_rgb(src, max_dim, transpose_exif=(not transposed and orient != 1), orient=orient)
+    return img, edge_combo
 
 
 def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict,
@@ -884,14 +1027,24 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict,
     need_shape = verdict == "clean" and enable.get("shape", True)
     need_pixels = bool(enable.get("qr") or enable.get("ocr"))
     img = None
+    edge_combo = None
+    is_anim = False
+    n_frames = 1
+    orient = 1
     if verdict == "clean" and (need_shape or need_pixels):
         opened = False
         max_dim = cfg["ocr"]["max_dim"]
+        strip_ratio = cfg["ocr"]["strip_ratio"]
         try:
             with Image.open(path) as im:
                 opened = True
+                orient = _get_exif_orientation(im)
+                n_frames = int(getattr(im, "n_frames", 1) or 1)
+                is_anim = bool(getattr(im, "is_animated", False) and n_frames > 1)
                 if need_shape:
                     w, h = im.size
+                    if orient in (5, 6, 7, 8):
+                        w, h = h, w
                     ratio = max(w, h) / max(1, min(w, h))
                     ratio_hard = float(cfg["shape"].get("max_ratio_hard", 8.0))
                     if w >= h and ratio >= ratio_hard:
@@ -901,74 +1054,79 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict,
                         reasons.append({"type": "shape", "label": f"分辨率过小 {w}x{h}"})
                         verdict, score = "suspect", 20
                 if verdict == "clean" and need_pixels:
-                    try:
-                        im.draft("RGB", (max_dim, max_dim))
-                    except Exception:
-                        pass
-                    img = _pil_to_rgb(im)
-            if img is not None and max(img.size) > max_dim:
-                img = ImageOps.contain(img, (max_dim, max_dim))
+                    img, edge_combo = _extract_frame_inputs(im, orient, max_dim, strip_ratio)
         except Exception as e:
             prefix = "读取失败" if (need_shape and not opened) else ("解码失败" if need_pixels else "读取失败")
             reasons.append({"type": "error", "label": f"{prefix} {e}"})
             verdict, score = "error", 0
 
-    # 3) 二维码 + 4) OCR（需要像素，前面的强命中就不必再跑）
-    qr_suspect = False
-    if verdict == "clean" and need_pixels:
-        if img is not None and verdict == "clean" and is_blank_image(img):
-            if not shape_long:
-                result = {"path": path_str, "verdict": "clean", "score": 0,
-                          "reasons": [], "ocr_text": "", "_stat": (size, mtime)}
-                cache.put(path_str, size, mtime, "clean", 0, [], "", version)
-                return result
-            img = None
+    def _analyze_frame(frame_img: Image.Image, frame_edge: Image.Image | None):
+        nonlocal verdict, score, ocr_text
+        frame_reasons: list[dict] = []
+        qr_suspect = False
+        if is_blank_image(frame_img) and (frame_edge is None or is_blank_image(frame_edge)):
+            return False, []
 
         small_1100 = None
 
         def _get_1100():
             nonlocal small_1100
             if small_1100 is None:
-                small_1100 = ImageOps.contain(img, (1100, 1100)) if max(img.size) > 1100 else img
+                small_1100 = ImageOps.contain(frame_img, (1100, 1100)) if max(frame_img.size) > 1100 else frame_img
             return small_1100
 
-        if img is not None and verdict == "clean" and enable.get("qr"):
+        if enable.get("qr"):
             try:
-                gray_img = img if img.mode == "L" else img.convert("L")
-                texts = decode_qr_texts(gray_img)
-                link = _qr_link(texts)
+                qr_targets = [frame_img] + ([frame_edge] if frame_edge is not None else [])
+                all_texts: list[str] = []
+                link = None
                 structure = False
-                if not link:
+                for qtarget in qr_targets:
+                    gray_img = qtarget if qtarget.mode == "L" else qtarget.convert("L")
+                    texts = decode_qr_texts(gray_img)
+                    all_texts.extend(texts)
+                    link = _qr_link(texts)
+                    if link:
+                        break
                     qr_img = (ImageOps.contain(gray_img, (1100, 1100))
                               if max(gray_img.size) > 1100 else gray_img)
-                    decoded, structure = detect_qr(qr_img, retry_image=gray_img if qr_img is not gray_img else None)
-                    texts.extend(decoded)
+                    decoded, st_hit = detect_qr(qr_img, retry_image=gray_img if qr_img is not gray_img else None)
+                    all_texts.extend(decoded)
+                    structure = structure or st_hit
                     link = _qr_link(decoded)
+                    if link:
+                        break
                 if link:
-                    reasons.append({"type": "qr", "label": f"二维码含链接 {link[:60]}"})
+                    frame_reasons.append({"type": "qr", "label": f"二维码含链接 {link[:60]}"})
                     verdict, score = "ad", 80
-                elif texts or structure:
-                    label = '二维码无链接内容' if texts else '疑似二维码图形（未能解码）'
-                    reasons.append({"type": "qr", "label": label})
+                elif all_texts or structure:
+                    label = '二维码无链接内容' if all_texts else '疑似二维码图形（未能解码）'
+                    reason_item = {"type": "qr", "label": label}
+                    if all_texts:
+                        reason_item["detail"] = all_texts[0][:120]
+                    frame_reasons.append(reason_item)
                     qr_suspect = True
             except Exception:
                 pass
 
-        if img is not None and verdict == "clean" and enable.get("ocr"):
+        if verdict == "clean" and enable.get("ocr"):
             try:
-                W, H = img.size
-                strip = int(H * cfg["ocr"]["strip_ratio"])
-                if max(W, H) <= 1000:
-                    regions = [img]
+                if frame_edge is not None:
+                    regions = [frame_edge]
                 else:
-                    band = max(24, strip)
-                    top = img.crop((0, 0, W, min(H, band)))
-                    bot = img.crop((0, max(0, H - band), W, H))
-                    gap = 16
-                    combo = Image.new("RGB", (W, top.height + gap + bot.height), (255, 255, 255))
-                    combo.paste(top, (0, 0))
-                    combo.paste(bot, (0, top.height + gap))
-                    regions = [combo]
+                    W, H = frame_img.size
+                    strip = int(H * cfg["ocr"]["strip_ratio"])
+                    if max(W, H) <= 1000:
+                        regions = [frame_img]
+                    else:
+                        band = max(24, strip)
+                        top = frame_img.crop((0, 0, W, min(H, band)))
+                        bot = frame_img.crop((0, max(0, H - band), W, H))
+                        gap = 16
+                        combo = Image.new("RGB", (W, top.height + gap + bot.height), (255, 255, 255))
+                        combo.paste(top, (0, 0))
+                        combo.paste(bot, (0, top.height + gap))
+                        regions = [combo]
                 texts: list[str] = []
                 hits_left: list[dict] = []
                 ocr_score, joined = 0.0, ""
@@ -999,22 +1157,50 @@ def analyze_file(path: Path, cfg: dict, cache: Cache, enable: dict,
                             return acc, True
                     return acc, False
 
+                scanned_ids = {id(reg) for reg in regions}
                 for reg in regions:
                     texts, hit = _scan_region(reg, texts)
                     if hit:
                         break
                 if ocr_score < cfg["ocr"]["score_high"] and cfg["ocr"]["full_image_if_nothing"]:
                     small = _get_1100()
-                    texts, _ = _scan_region(small, texts)
+                    if id(small) not in scanned_ids:
+                        texts, _ = _scan_region(small, texts)
                 ocr_text = joined
                 if hits_left:
-                    reasons += hits_left
+                    frame_reasons += hits_left
                     score = ocr_score
                     verdict = "ad" if score >= cfg["ocr"]["score_high"] else "suspect"
             except Exception as e:
-                reasons.append({"type": "error", "label": f"OCR失败 {e}"})
+                frame_reasons.append({"type": "error", "label": f"OCR失败 {e}"})
                 verdict, score = "error", 0
 
+        return qr_suspect, frame_reasons
+
+    # 3) 二维码 + 4) OCR（需要像素，前面的强命中就不必再跑）
+    qr_suspect = False
+    if verdict == "clean" and need_pixels and img is not None:
+        qr_suspect, frame_reasons = _analyze_frame(img, edge_combo)
+        reasons.extend(frame_reasons)
+        # GIF / 动态 WebP：首帧干净或空白时抽检中帧与末帧（最多 2 帧），防止首帧留白藏尾帧广告
+        if verdict == "clean" and not qr_suspect and is_anim and n_frames > 1:
+            sample_indices = sorted({n_frames // 2, n_frames - 1} - {0})
+            max_dim = cfg["ocr"]["max_dim"]
+            strip_ratio = cfg["ocr"]["strip_ratio"]
+            try:
+                with Image.open(path) as anim_im:
+                    for fidx in sample_indices:
+                        try:
+                            anim_im.seek(fidx)
+                            f_img, f_edge = _extract_frame_inputs(anim_im.copy(), orient, max_dim, strip_ratio)
+                        except Exception:
+                            continue
+                        qr_suspect, extra_reasons = _analyze_frame(f_img, f_edge)
+                        if verdict != "clean" or qr_suspect:
+                            reasons.extend(extra_reasons)
+                            break
+            except Exception:
+                pass
         if verdict == "clean" and (qr_suspect or shape_long):
             verdict, score = "suspect", 30
 
@@ -1049,8 +1235,13 @@ def _path_is_within(path_str: str, root_str: str) -> bool:
     return p_norm.startswith(prefix)
 
 
+_GATHER_STAT_TLS = threading.local()
+_ORIG_OS_WALK = os.walk
+
+
 def gather_images(roots: list[str], cfg: dict) -> list[Path]:
     files: list[Path] = []
+    stats_cache: dict[str, tuple[int, float]] = {}
     excluded = []
     for p in [cfg.get('quarantine_dir', '')] + cfg.get('quarantine_locations', []):
         if p:
@@ -1085,16 +1276,51 @@ def gather_images(roots: list[str], cfg: dict) -> list[Path]:
             continue
         if not rootp.is_dir():
             raise OSError(f'扫描目录不存在或无法访问：{rootp}')
-        def walk_error(error):
-            raise OSError(f'无法读取扫描目录：{error.filename}：{error}') from error
-        for dirpath, dirnames, filenames in os.walk(rootp, onerror=walk_error):
-            dp = Path(dirpath)
-            dirnames[:] = [d for d in dirnames if not d.startswith(QUARANTINE_NAME)
-                           and not is_quarantined(dp / d)]
-            for fn in filenames:
-                dot = fn.rfind(".")
-                if dot >= 0 and fn[dot:].lower() in IMG_EXTS:
-                    files.append(dp / fn)
+        if os.walk is not _ORIG_OS_WALK:
+            def walk_error(error):
+                raise OSError(f'无法读取扫描目录：{error.filename}：{error}') from error
+            for dirpath, dirnames, filenames in os.walk(rootp, onerror=walk_error):
+                dp = Path(dirpath)
+                dirnames[:] = [d for d in dirnames if not d.startswith(QUARANTINE_NAME)
+                               and not is_quarantined(dp / d)]
+                for fn in filenames:
+                    dot = fn.rfind(".")
+                    if dot >= 0 and fn[dot:].lower() in IMG_EXTS:
+                        files.append(dp / fn)
+            continue
+        stack = [rootp]
+        while stack:
+            dp = stack.pop()
+            try:
+                with os.scandir(dp) as entries:
+                    subdirs: list[Path] = []
+                    for entry in entries:
+                        name = entry.name
+                        try:
+                            is_dir = entry.is_dir(follow_symlinks=False)
+                        except OSError:
+                            is_dir = False
+                        if is_dir:
+                            if not name.startswith(QUARANTINE_NAME):
+                                sub = dp / name
+                                if not is_quarantined(sub):
+                                    subdirs.append(sub)
+                            continue
+                        dot = name.rfind(".")
+                        if dot >= 0 and name[dot:].lower() in IMG_EXTS:
+                            fp = dp / name
+                            files.append(fp)
+                            try:
+                                if not entry.is_symlink():
+                                    st = entry.stat(follow_symlinks=False)
+                                    stats_cache[str(fp)] = (st.st_size, st.st_mtime)
+                            except OSError:
+                                pass
+                    if subdirs:
+                        stack.extend(reversed(subdirs))
+            except OSError as error:
+                raise OSError(f'无法读取扫描目录：{dp}：{error}') from error
+    _GATHER_STAT_TLS.stats = stats_cache
     return files
 
 
@@ -1130,8 +1356,11 @@ def _scan_worker(roots, cfg, enable, cache, out_q, cancel, pause):
         out_q.put(('cancelled', None))
         return
 
-    # 文件收集放后台线程：大目录 os.walk 会卡住 UI
+    # 文件收集放后台线程：大目录收集会卡住 UI
+    _GATHER_STAT_TLS.stats = None
     files = gather_images(roots, cfg)
+    pre_stats = getattr(_GATHER_STAT_TLS, 'stats', None) or {}
+    _GATHER_STAT_TLS.stats = None
     seen_files: set[str] = set()
     unique_files: list[Path] = []
     resolved_parents: dict[str, str] = {}
@@ -1166,9 +1395,15 @@ def _scan_worker(roots, cfg, enable, cache, out_q, cancel, pause):
         if stopped():
             out_q.put(('cancelled', None))
             return
+        p_str = str(p)
+        cached_st = pre_stats.get(p_str)
+        if cached_st is not None:
+            infos.append((p_str, cached_st[0], cached_st[1]))
+            stat_by_path[p_str] = cached_st
+            valid_files.append(p)
+            continue
         try:
             st = p.stat()
-            p_str = str(p)
             infos.append((p_str, st.st_size, st.st_mtime))
             stat_by_path[p_str] = (st.st_size, st.st_mtime)
             valid_files.append(p)
@@ -1223,7 +1458,7 @@ def _scan_worker(roots, cfg, enable, cache, out_q, cancel, pause):
         return
 
     workers = max(1, int(cfg.get("workers", 4)))
-    workers = min(workers, os.cpu_count() or 4, 8)
+    workers = min(workers, os.cpu_count() or 4, 16)
     if enable.get("ocr"):
         get_ocr()  # 提前初始化，确定实际是否用上 GPU
         if USING_GPU:
@@ -1233,6 +1468,7 @@ def _scan_worker(roots, cfg, enable, cache, out_q, cancel, pause):
     pending = iter(files_to_scan)
     futs = {}
     exhausted = False
+    paused_committed = False
 
     def _analyze(p_):
         p_str = str(p_)
@@ -1248,6 +1484,7 @@ def _scan_worker(roots, cfg, enable, cache, out_q, cancel, pause):
                 cancelled_scan = True
                 break
             if pause is None or not pause.is_set():
+                paused_committed = False
                 while len(futs) < workers and not exhausted and not cancel.is_set():
                     if pause is not None and pause.is_set():
                         break
@@ -1257,6 +1494,9 @@ def _scan_worker(roots, cfg, enable, cache, out_q, cancel, pause):
                         break
                     futs[ex.submit(_analyze, p_)] = p_
             if not futs:
+                if not paused_committed:
+                    cache.commit()  # 暂停期间主动释放写事务锁，避免阻塞其他进程
+                    paused_committed = True
                 cancel.wait(.05)
                 continue
             completed, _ = wait(futs, timeout=.05, return_when=FIRST_COMPLETED)
@@ -1434,27 +1674,40 @@ def _load_quarantine(root):
             if item['dst'] in known:
                 continue  # 快照成功、日志清理前中断，幂等重放。
             src, dst = Path(item['src']), Path(item['dst'])
-            if dst.exists() and not src.exists() and dst.stat().st_size == record['size']:
+            sizes = {record['size']}
+            if isinstance(record.get('lstat_size'), int) and record['lstat_size'] >= 0:
+                sizes.add(record['lstat_size'])
+            if dst.exists() and not src.exists() and dst.stat().st_size in sizes:
                 manifest['items'].append(item)
                 known.add(item['dst'])
             elif src.exists() and not dst.exists():
                 continue  # 意图已保存，但移动尚未开始或已回退。
             else:
-                raise ValueError(f'发现未完成的隔离移动，请保留并检查这两个位置：{src} / {dst}')
+                # 仅保留真正未决冲突记录，不阻断同批次已成功移动条目的读取与还原
+                manifest.setdefault('_unresolved_journal', []).append(line if line.endswith('\n') else line + '\n')
     return manifest
 
 
 def _save_quarantine(root, manifest):
     root = Path(root).resolve()
-    manifest['items'] = [_safe_quarantine_item(item, root) for item in manifest['items']]
-    manifest['version'] = 2
-    _write_json_atomic(root / 'manifest.json', manifest)
-    (root / '.ad-filter-journal.jsonl').unlink(missing_ok=True)
+    unresolved = manifest.pop('_unresolved_journal', None) or []
+    clean_manifest = {k: v for k, v in manifest.items() if k != '_unresolved_journal'}
+    clean_manifest['items'] = [_safe_quarantine_item(item, root) for item in clean_manifest['items']]
+    clean_manifest['version'] = 2
+    _write_json_atomic(root / 'manifest.json', clean_manifest)
+    journal_path = root / '.ad-filter-journal.jsonl'
+    if unresolved:
+        journal_path.write_text(''.join(unresolved), encoding='utf-8')
+    else:
+        journal_path.unlink(missing_ok=True)
 
 
-def _journal_quarantine_move(root, item, size):
+def _journal_quarantine_move(root, item, size, lstat_size=None):
+    payload = {'item': item, 'size': size}
+    if lstat_size is not None and lstat_size != size:
+        payload['lstat_size'] = lstat_size
     with open(_quarantine_control(root, '.ad-filter-journal.jsonl'), 'a', encoding='utf-8') as stream:
-        stream.write(json.dumps({'item': item, 'size': size}, ensure_ascii=False) + '\n')
+        stream.write(json.dumps(payload, ensure_ascii=False) + '\n')
         stream.flush()
         os.fsync(stream.fileno())
 
@@ -1520,7 +1773,7 @@ def apply_quarantine(items: list[dict], roots: list[str], quarantine_root: Path,
     errors = []
     moved = 0
     ok_paths: list[str] = []
-    incomplete = False
+    unresolved_lines: list[str] = list(manifest.get('_unresolved_journal') or [])
     root_names = {}
     for r in roots:
         try:
@@ -1535,6 +1788,9 @@ def apply_quarantine(items: list[dict], roots: list[str], quarantine_root: Path,
     for it in items:
         src = Path(it["path"])
         dst = None
+        entry = None
+        st_size = 0
+        lst_size = None
         try:
             src_abs = Path(os.path.abspath(str(src))) if src.is_symlink() else src.resolve()
             src_res = str(src_abs)
@@ -1554,8 +1810,12 @@ def apply_quarantine(items: list[dict], roots: list[str], quarantine_root: Path,
             dst.parent.mkdir(parents=True, exist_ok=True)
             entry = _safe_quarantine_item({'src': src_res, 'dst': str(dst),
                 'time': time.strftime('%F %T'), 'reasons': it.get('reasons', [])}, quarantine_root)
-            st = src.lstat() if src.is_symlink() else src.stat()
-            _journal_quarantine_move(quarantine_root, entry, st.st_size)
+            if src.is_symlink():
+                lst_size = src.lstat().st_size
+                st_size = src.stat().st_size if src.exists() else lst_size
+            else:
+                st_size = src.stat().st_size
+            _journal_quarantine_move(quarantine_root, entry, st_size, lst_size)
             _safe_move(src, dst)
             manifest['items'].append(entry)
             moved += 1
@@ -1565,13 +1825,17 @@ def apply_quarantine(items: list[dict], roots: list[str], quarantine_root: Path,
             log_fn({"action": "quarantine", "src": str(src), "dst": str(dst)})
         except Exception as e:
             errors.append(f"{src}: {e}")
-            if dst is not None and dst.exists() and src.exists():
-                incomplete = True
-    if not incomplete:
-        try:
-            _save_quarantine(quarantine_root, manifest)
-        except OSError as e:
-            errors.append(f'文件已隔离，恢复记录保存在日志中，下次打开会自动恢复：{e}')
+            if dst is not None and entry is not None and dst.exists() and src.exists():
+                rec = {'item': entry, 'size': st_size}
+                if lst_size is not None and lst_size != st_size:
+                    rec['lstat_size'] = lst_size
+                unresolved_lines.append(json.dumps(rec, ensure_ascii=False) + '\n')
+    if unresolved_lines:
+        manifest['_unresolved_journal'] = unresolved_lines
+    try:
+        _save_quarantine(quarantine_root, manifest)
+    except OSError as e:
+        errors.append(f'文件已隔离，恢复记录保存在日志中，下次打开会自动恢复：{e}')
     return moved, errors, ok_paths
 
 

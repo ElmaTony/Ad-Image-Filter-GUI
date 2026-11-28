@@ -1,11 +1,11 @@
-- 修复透明背景 PNG/WebP 贴纸、水印与二维码以及 16 位灰度图片在识别与预览时变全黑或全白的问题。
-- 修复扫描目录路径大小写不同时未能命中已有缓存的问题，并支持正常隔离、还原或删除带有「只读」属性的图片文件。
-- 修复「规则管理」中修改单元格后未按回车直接点击保存会丢失当前编辑内容的问题；「隔离区管理 → 全部还原」新增确认提示以防误触。
-- 提升高分屏缩放下的缩略图、详情预览与图标清晰度，优化大批量结果勾选响应与宽松阈值相似图分组速度，并在大图查看器中同步显示「已标广告」状态、增强导出 CSV 在表格软件中的安全性。
+- 新增竖长图（条漫/长截图）首尾高清切片识别、GIF/WebP 动图多帧抽检、EXIF 自动转正与二维码裸域名/明文摘要识别，降低大尺寸图并发扫描内存占用。
+- 优化 OCR 文本行间拼接与英文句点分词，大幅减少英文句子和跨行文本误报；切换扫描选项或规则后保留历史配置缓存，支持多模式瞬时切换且自动控制缓存体积。
+- 修复点击「清除」后选中高亮残留、状态灯在相似分组完成后误闪烁、隔离批处理单文件冲突阻塞整批记录、处置方式重启丢失、设置跨机导入盘符拒收、大图查看器无法缩小与重复取消标记等问题。
+- 改进工作台交互细节：支持同名扫描目录自动消歧、准确的原因筛选、命令面板按状态置灰与点击外部关闭、弹窗可拖拽调整尺寸及操作日志完整记录。
 
 ---
 
-- Fixed transparent PNG/WebP stickers, watermarks, and QR codes as well as 16-bit grayscale images turning solid black or white during detection and preview.
-- Fixed scan cache misses when folder paths differ in letter casing on Windows, and added support for quarantining, restoring, and deleting read-only image files without permission errors.
-- Fixed uncommitted inline cell edits in **Rule Manager** being lost when clicking Save directly without pressing Enter, and added a confirmation prompt before **Restore All** in **Quarantine Manager**.
-- Improved thumbnail, detail preview, and icon sharpness on High-DPI displays, sped up selection updates and higher-threshold similarity grouping on large result sets, added a marked-ad state indicator in Lightbox, and hardened exported CSV reports for spreadsheet apps.
+- Added high-resolution head/tail strip detection for tall vertical images (long comics/screenshots), multi-frame sampling for animated GIF/WebP files, EXIF orientation alignment, naked-domain QR recognition with text summary in the detail pane, and lower memory usage when decoding large images.
+- Refined OCR line joining and English punctuation normalization to prevent cross-line and sentence false positives; preserved multi-configuration scan cache across mode switches with automatic cache size pruning.
+- Fixed selection highlight lingering after **Clear**, status indicator staying active after similarity clustering, single-file conflicts blocking entire quarantine batches, disposal mode resetting on restart, cross-machine config import failing on missing drives, and Lightbox zoom-out / toggle-ad behavior.
+- Improved workbench polish: automatic disambiguation for duplicate folder names, exact hit-reason filtering, context-aware Command Palette states and click-outside dismissal, resizable dialogs, and complete action logging.

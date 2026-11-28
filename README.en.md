@@ -113,8 +113,8 @@ Toggle each detection channel independently in **Settings**. Works alongside **d
 | --- | --- | :---: |
 | **Filename & Allowlist** | Regex matching for channel names, promo terms, and `@handle` tags; allowlist rules take priority | Enabled |
 | **Image Geometry** | Header-only dimension inspection flagging extreme aspect-ratio banners or tiny resolutions for review | Enabled |
-| **QR Code** | Local OpenCV + pyzbar decoding; URL codes are marked Ad, while plain-text or structurally valid undecodable codes are marked Suspect | Enabled |
-| **OCR Text** | Local RapidOCR inference; crops top/bottom strips with brightness boost for semi-transparent watermarks, optional full-image fallback, and weighted keyword scoring | Disabled |
+| **QR Code** | Local OpenCV + pyzbar decoding; flags URLs and naked domains as Ad, while plain-text or structurally valid undecodable codes are marked Suspect with text previews | Enabled |
+| **OCR Text** | Local RapidOCR inference; preserves high-res head/tail crops for tall vertical images, samples animated GIF/WebP frames, applies brightness boost for watermarks, and scores lines independently | Disabled |
 
 <details>
 <summary><strong>⌨️ Keyboard Shortcuts (Workbench &amp; Lightbox)</strong></summary>
@@ -144,7 +144,7 @@ Toggle each detection channel independently in **Settings**. Works alongside **d
 - **Offline Image Analysis**: Decoding, QR scanning, OCR inference, and perceptual hashing run solely on your PC—never uploading images, OCR text, or folder paths.
 - **Portable Data Files** (stored alongside the EXE or script):
   - `ad_filter_config.json`: rules, theme palette, grid density, and preferences
-  - `ad_filter_cache.db`: local SQLite scan cache (invalidates only when rules/channels change; switching themes or density never triggers a rescan)
+  - `ad_filter_cache.db`: local SQLite scan cache (retains per-configuration signatures with automatic pruning; switching themes, density, or scan modes keeps prior cache intact)
   - `ad_filter_history.json`: last 100 scan history entries
   - `ad_filter_log.jsonl`: operation and disposal logs
 - **Minimal Network Usage**: Connects to GitHub only when you manually click **Check for Updates** to read release metadata; access tokens are never saved to disk.

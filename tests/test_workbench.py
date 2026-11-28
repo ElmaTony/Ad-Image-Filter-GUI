@@ -938,6 +938,95 @@ class WorkbenchTests(unittest.TestCase):
         self.app.thumbs.invalidate([p_str])
         self.assertNotIn(p_str, self.app.thumbs._cache)
 
+    def test_disposal_persistence_clear_sel_sync_and_similar_status_role(self):
+        # 1) 分段按钮 setChecked 真正切换模式并持久化，新实例启动自动恢复
+        self.app.btn_dr.setChecked(True)
+        self.assertEqual(self.app._current_disposal(), 'recycle')
+        self.assertEqual(af.load_config()['disposal'], 'recycle')
+        app2 = gui.App(af.load_config())
+        try:
+            self.assertEqual(app2._current_disposal(), 'recycle')
+            self.assertTrue(app2.btn_dr.isChecked())
+        finally:
+            app2.close()
+            self.qt.processEvents()
+        self.app.btn_dq.setChecked(True)
+
+        # 2) clear_sel 清理 QListView selectionModel，防止 Ctrl 加选重勾旧项
+        from PySide6.QtCore import QItemSelection, QItemSelectionModel
+        sm = self.app.grid.selectionModel()
+        sm.select(QItemSelection(self.app.model.index(0, 0), self.app.model.index(1, 0)),
+                  QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        self.assertEqual(len(self.app.checked), 2)
+        self.app.clear_sel()
+        self.assertFalse(self.app.checked)
+        self.assertFalse(sm.selectedRows())
+
+        # 3) _apply_similar 完成后保持 ok 态而非 running 态
+        self.app._apply_similar([[self.rows[0]['path'], self.rows[1]['path']]])
+        self.assertEqual(self.app._status_role, 'ok')
+        self.assertFalse(self.app.dot._timer.isActive())
+
+    def test_cross_machine_import_exact_reason_filter_duplicate_folders_and_lightbox(self):
+        from PySide6.QtCore import QPoint, QPointF
+        # 1) 跨机不存在盘符的隔离目录配置导入自动回退默认并成功
+        foreign_cfg = copy.deepcopy(af.DEFAULT_CONFIG)
+        foreign_cfg['quarantine_dir'] = 'Z:\\__missing_drive__\\Isolated'
+        foreign_cfg['ui_theme'] = 'dark' if self.app.theme == 'light' else 'light'
+        cfg_file = self.root / 'foreign.json'
+        cfg_file.write_text(json.dumps(foreign_cfg), encoding='utf-8')
+        dlg = self.app.build_config()
+        with patch.object(QFileDialog, 'getOpenFileName', return_value=(str(cfg_file), 'json')):
+            dlg._import_cfg()
+        self.assertEqual(self.app.cfg['quarantine_dir'], '')
+        self.assertEqual(self.app.theme, foreign_cfg['ui_theme'])
+        dlg.close()
+        dlg.deleteLater()
+
+        # 2) 同名扫描目录自动消歧 & 原因筛选精确匹配（短标签不误筛长标签，OCR 开头规则名正常）
+        d1 = self.root / 'GroupA' / 'Photos'
+        d2 = self.root / 'GroupB' / 'Photos'
+        d1.mkdir(parents=True)
+        d2.mkdir(parents=True)
+        p1, p2 = d1 / 'a.jpg', d2 / 'b.jpg'
+        Image.new('RGB', (400, 300), (80, 90, 100)).save(p1)
+        Image.new('RGB', (400, 300), (100, 90, 80)).save(p2)
+        self.app._roots = []
+        self.app.add_folders([str(d1), str(d2)])
+        chip_texts = sorted(c.text() for c in self.app.folder_bar._chips.values())
+        self.assertEqual(chip_texts, ['GroupA/Photos', 'GroupB/Photos'])
+
+        self.app.items = [
+            {'path': str(p1), 'verdict': 'ad', 'score': 99, 'reasons': [{'type': 'filename', 'label': '推广'}], 'ocr_text': ''},
+            {'path': str(p2), 'verdict': 'ad', 'score': 99, 'reasons': [{'type': 'filename', 'label': '推广图'}], 'ocr_text': ''},
+        ]
+        self.app.refresh()
+        self.app._reload_reason_filter()
+        self.app.f_reason.setCurrentIndex(self.app.f_reason.findText('推广'))
+        self.assertEqual([it['path'] for it in self.app.model.items], [str(p1)])
+        self.app.clear_filters()
+
+        # 3) Lightbox 缩小到 < 1.0 与重复按 A 取消标记
+        self.app.grid.setCurrentIndex(self.app.model.index(0, 0))
+        self.app.open_big()
+        lb = self.app._big_win
+        self.assertTrue(self.pump(until=lambda: lb._pix is not None, timeout=5))
+        center = QPointF(lb.width() / 2, lb.height() / 2)
+
+        class Wheel:
+            def __init__(self, dy): self._dy = dy
+            def angleDelta(self): return QPoint(0, self._dy)
+            def position(self): return center
+
+        lb.wheelEvent(Wheel(-240))
+        self.assertLess(lb.scale, 1.0)
+        lb._mark(True)
+        self.assertIn(str(p1), self.app.checked)
+        lb._mark(True)
+        self.assertNotIn(str(p1), self.app.checked)
+        lb.close()
+        self.pump(.05)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

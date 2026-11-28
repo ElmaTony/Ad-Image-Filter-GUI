@@ -234,10 +234,12 @@ def verify_colors(OUT, check):
     check("[色] 执行处置=红色实底", red > 300, f"red_px={red}")
 
     # 已选 pill = 品牌橙（audit-dark-workbench 里勾了 2 张）
+    import cds_tokens as _cdst
+    ar, ag, ab = _cdst.accent_rgb(True)
     img2 = load("audit-dark-workbench")
-    clay = ((abs(img2[:, :, 0].astype(int) - 217) < 40)
-            & (abs(img2[:, :, 1].astype(int) - 119) < 45)
-            & (abs(img2[:, :, 2].astype(int) - 87) < 45)).sum()
+    clay = ((abs(img2[:, :, 0].astype(int) - ar) < 40)
+            & (abs(img2[:, :, 1].astype(int) - ag) < 45)
+            & (abs(img2[:, :, 2].astype(int) - ab) < 45)).sum()
     check("[色] 品牌橙大量在场(按钮/勾选/已选)", clay > 800, f"clay_px={clay}")
 
 

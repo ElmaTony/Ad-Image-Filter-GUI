@@ -173,7 +173,8 @@ af.apply_quarantine([{'path': str(p)} for p in source.glob('*.jpg')],
             self.assertEqual(af.analyze_file(path, self.cfg, a, enabled)['verdict'], 'ad')
             a.commit()
             st = path.stat()
-            self.assertFalse(b.get_batch([(str(path), st.st_size, st.st_mtime)], af.result_signature(self.cfg, disabled)))
+            got = b.get_batch([(str(path), st.st_size, st.st_mtime)], af.result_signature(self.cfg, disabled))
+            self.assertEqual(got[str(path)]['verdict'], 'clean')
         finally:
             for cache in caches:
                 cache.conn.close()
